@@ -48,6 +48,7 @@ export function FamilyMemberDialog({
   const [maxRetries, setMaxRetries] = useState(2);
   const [retryIntervalMinutes, setRetryIntervalMinutes] = useState(10);
   const [allowMealReminders, setAllowMealReminders] = useState(true);
+  const [allowMedicineReminders, setAllowMedicineReminders] = useState(true);
   const [allowConfirmationCalls, setAllowConfirmationCalls] = useState(true);
   const [preferredVoiceGender, setPreferredVoiceGender] = useState<'FEMALE' | 'MALE' | 'NEUTRAL'>(
     'FEMALE'
@@ -75,6 +76,7 @@ export function FamilyMemberDialog({
       setMaxRetries(member.callingPreferences?.maxRetries ?? 2);
       setRetryIntervalMinutes(member.callingPreferences?.retryIntervalMinutes ?? 10);
       setAllowMealReminders(member.callingPreferences?.allowMealReminders ?? true);
+      setAllowMedicineReminders(member.callingPreferences?.allowMedicineReminders ?? true);
       setAllowConfirmationCalls(member.callingPreferences?.allowConfirmationCalls ?? true);
       setPreferredVoiceGender(member.callingPreferences?.preferredVoiceGender ?? 'FEMALE');
       setRecordingConsentStatus(member.recordingConsentStatus);
@@ -96,6 +98,7 @@ export function FamilyMemberDialog({
       setMaxRetries(2);
       setRetryIntervalMinutes(10);
       setAllowMealReminders(true);
+      setAllowMedicineReminders(true);
       setAllowConfirmationCalls(true);
       setPreferredVoiceGender('FEMALE');
       setRecordingConsentStatus('PENDING');
@@ -129,6 +132,7 @@ export function FamilyMemberDialog({
         maxRetries: Number(maxRetries),
         retryIntervalMinutes: Number(retryIntervalMinutes),
         allowMealReminders,
+        allowMedicineReminders,
         allowConfirmationCalls,
         preferredVoiceGender,
       },
@@ -402,10 +406,17 @@ export function FamilyMemberDialog({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
               <label className="flex items-center justify-between rounded-xl border border-sky-100 bg-white px-3 py-2 text-xs font-semibold text-slate-700">
                 <span>Meal Reminders</span>
                 <Switch checked={allowMealReminders} onCheckedChange={setAllowMealReminders} />
+              </label>
+              <label className="flex items-center justify-between rounded-xl border border-sky-100 bg-white px-3 py-2 text-xs font-semibold text-slate-700">
+                <span>Medicine Reminders</span>
+                <Switch
+                  checked={allowMedicineReminders}
+                  onCheckedChange={setAllowMedicineReminders}
+                />
               </label>
               <label className="flex items-center justify-between rounded-xl border border-sky-100 bg-white px-3 py-2 text-xs font-semibold text-slate-700">
                 <span>Confirmation Calls</span>

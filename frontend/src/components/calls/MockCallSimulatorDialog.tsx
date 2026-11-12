@@ -172,9 +172,11 @@ export function MockCallSimulatorDialog({
               </div>
             ) : null}
 
-            <div className="rounded-xl border border-sky-100 bg-sky-50/50 p-3 text-[11px] text-slate-600">
-              All simulated calls are strictly tagged <strong>mode: mock</strong> in MongoDB and use
-              the family member&apos;s preferred language and recording consent settings.
+            <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-900">
+              <strong>MOCK VOICE SANDBOX ONLY:</strong> This does{' '}
+              <strong>NOT</strong> dial any real phone number or contact Sarvam telephony. All
+              generated call logs, transcripts, and audio are permanently tagged{' '}
+              <strong>MOCK (isMock: true)</strong> for offline development/testing.
             </div>
 
             <div className="flex justify-end gap-3">

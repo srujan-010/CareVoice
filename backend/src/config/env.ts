@@ -123,19 +123,27 @@ export function getSarvamWebhookReadiness(): {
   const hasRouteToken = env.SARVAM_WEBHOOK_TOKEN.length >= 24;
   const hasHmacSecret = env.SARVAM_WEBHOOK_SECRET.length >= 16;
 
-  if (!hasPublicUrl) missingFields.push('PUBLIC_WEBHOOK_BASE_URL');
+  if (!hasPublicUrl) {
+    missingFields.push('PUBLIC_WEBHOOK_BASE_URL');
+  } else if (!isHttps) {
+    missingFields.push('PUBLIC_WEBHOOK_BASE_URL (must use https://)');
+  }
   if (!hasRouteToken && !hasHmacSecret) {
     missingFields.push('SARVAM_WEBHOOK_TOKEN');
   }
 
   return {
-    ready: hasPublicUrl && (hasRouteToken || hasHmacSecret),
+    ready: hasPublicUrl && isHttps && (hasRouteToken || hasHmacSecret),
     missingFields,
     hasPublicUrl,
     isHttps,
     hasRouteToken,
     hasHmacSecret,
   };
+}
+
+export function isMockSimulationAllowed(): boolean {
+  return env.NODE_ENV !== 'production' || env.ALLOW_DEV_DEMO_MODE;
 }
 
 export function isTelephonyReady(): {

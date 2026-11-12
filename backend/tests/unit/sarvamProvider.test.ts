@@ -156,6 +156,7 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
       attemptId: 'attempt_xyz_001',
       providerCallId: 'attempt_xyz_001',
       rawStatus: 'QUEUED',
+      httpStatus: 200,
     });
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -187,6 +188,12 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
           family_id: 'family_001',
           call_type: 'MEDICINE_REMINDER',
           language: 'te-IN',
+          patient_name: 'Savitri Devi',
+          medicine_name: 'Metformin',
+          dosage: '500mg',
+          food_instruction: 'BEFORE_FOOD',
+          associated_meal: 'BREAKFAST',
+          recording_consent_granted: 'true',
         },
       },
     });
@@ -259,6 +266,8 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
     for (const [sarvamStatus, expectedOutcome] of [
       ['no_answer', 'NO_ANSWER'],
       ['busy', 'BUSY'],
+      ['rejected', 'REJECTED'],
+      ['cancelled', 'CANCELLED'],
       ['failed', 'FAILED'],
     ] as const) {
       const res = evaluateSarvamAgentOutcome(
@@ -276,5 +285,120 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
       expect(res.medicineConfirmed).toBe('UNCONFIRMED');
       expect(res.mealConfirmed).toBeNull();
     }
+
+    // Intermediate lifecycle statuses stay intermediate + PENDING outcome
+    for (const [stage, expectedLifecycle] of [
+      ['queued', 'QUEUED'],
+      ['initiating', 'INITIATING'],
+      ['ringing', 'RINGING'],
+      ['in_progress', 'IN_PROGRESS'],
+    ] as const) {
+      const mid = evaluateSarvamAgentOutcome(
+        { attempt_id: `a_${stage}`, status: stage },
+        'Savitri',
+        'Metformin'
+      );
+      expect(mid.isIntermediateEvent).toBe(true);
+      expect(mid.callStatus).toBe(expectedLifecycle);
+      expect(mid.outcome).toBe('PENDING');
+    }
+
+    // Recording consent denied: withhold transcript turns & summary while still evaluating outcome safely
+    const noRecConsent = evaluateSarvamAgentOutcome(
+      {
+        attempt_id: 'a_no_rec',
+        status: 'connected',
+        duration: 22,
+        final_agent_variables: {
+          medicine_taken: true,
+          summary: 'Sensitive raw note that must be withheld',
+        },
+        interaction_transcript: [
+          { role: 'agent', en_text: 'Did you take Metformin?' },
+          { role: 'user', en_text: 'Yes, I took it.' },
+        ],
+      },
+      'Savitri',
+      'Metformin',
+      { recordingConsentGranted: false }
+    );
+    expect(noRecConsent.outcome).toBe('COMPLETED');
+    expect(noRecConsent.medicineConfirmed).toBe('TAKEN');
+    expect(noRecConsent.turns).toEqual([]);
+    expect(noRecConsent.aiSummary).not.toContain('Sensitive raw note');
+    expect(noRecConsent.safetyFlags).toContain('RECORDING_AND_TRANSCRIPT_WITHHELD_NO_CONSENT');
+  });
+
+  it('requires HTTPS webhook URL and validates Sarvam deployment verification states', async () => {
+    vi.resetModules();
+    vi.stubEnv('TELEPHONY_ENABLED', 'true');
+    vi.stubEnv('VOICE_PROVIDER_MODE', 'sarvam');
+    vi.stubEnv('SARVAM_API_BASE_URL', 'https://apps.sarvam.ai');
+    vi.stubEnv('SARVAM_API_KEY', 'sk_test_deploy_check');
+    vi.stubEnv('SARVAM_ORG_ID', 'org-1');
+    vi.stubEnv('SARVAM_WORKSPACE_ID', 'ws-1');
+    vi.stubEnv('SARVAM_AGENT_ID', 'agent-1');
+    vi.stubEnv('SARVAM_AGENT_VERSION', '3');
+    vi.stubEnv('SARVAM_CONNECTION_ID', 'conn-1');
+    vi.stubEnv('SARVAM_PHONE_NUMBER', '+917965860596');
+    vi.stubEnv('SARVAM_WEBHOOK_TOKEN', 'tok_12345678901234567890');
+    vi.stubEnv('PUBLIC_WEBHOOK_BASE_URL', 'http://localhost:4000');
+
+    const { getSarvamWebhookReadiness } = await import('../../src/config/env');
+    expect(getSarvamWebhookReadiness()).toMatchObject({
+      ready: false,
+      isHttps: false,
+    });
+
+    vi.resetModules();
+    vi.stubEnv('PUBLIC_WEBHOOK_BASE_URL', 'https://carevoice.onrender.com');
+    const { getSarvamWebhookReadiness: httpsReadiness } = await import('../../src/config/env');
+    expect(httpsReadiness()).toMatchObject({
+      ready: true,
+      isHttps: true,
+    });
+
+    const { SarvamVoiceProvider } = await import('../../src/adapters/voice/sarvamVoice.provider');
+    const provider = new SarvamVoiceProvider();
+
+    // Active matching deployment passes
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => [
+          {
+            deployment_id: 'dep_1',
+            app_id: 'agent-1',
+            app_version: 3,
+            status: 'active',
+            connection_configs: [
+              { connection_id: 'conn-1', phone_numbers: ['+917965860596'] },
+            ],
+          },
+        ],
+      })
+    );
+    const okDeploy = await provider.verifyAgentDeployment();
+    expect(okDeploy).toMatchObject({
+      verified: true,
+      status: 'active',
+      connectionVerified: true,
+      phoneVerified: true,
+    });
+
+    // Inactive deployment blocks
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => [{ deployment_id: 'dep_1', app_id: 'agent-1', status: 'paused' }],
+      })
+    );
+    const inactiveDeploy = await provider.verifyAgentDeployment();
+    expect(inactiveDeploy.verified).toBe(false);
+    expect(inactiveDeploy.status).toBe('inactive');
   });
 });

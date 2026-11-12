@@ -350,7 +350,33 @@ describe('CareVoice End-to-End API & Security Integration Tests', () => {
     expect(notifRes.body.data.notifications.length).toBeGreaterThan(0);
   });
 
-  it('validates medicine endDate update/clear, atomic callback dispatch, retry limit & dose taken cancellation', async () => {
+  it('rejects unsigned webhooks and serves accurate separated report statuses + real dashboard overview', async () => {
+    const webhookNoSig = await request(app)
+      .post('/api/voice-agent/webhook/sarvam')
+      .send({ call_id: 'fake' });
+    expect([401, 403]).toContain(webhookNoSig.status);
+
+    // Check report separation
+    const reportRes = await request(app)
+      .get('/api/reports?period=weekly')
+      .set('Authorization', `Bearer ${tokenA}`);
+    expect(reportRes.status).toBe(200);
+    expect(reportRes.body.data.summary.statusBreakdown.PATIENT_REPORTED_TAKEN).toBeGreaterThanOrEqual(
+      1
+    );
+    expect(reportRes.body.data.summary.statusBreakdown.CALLBACK_REQUESTED).toBeGreaterThanOrEqual(1);
+    expect(reportRes.body.data.summary.statusBreakdown.ESCALATED).toBeGreaterThanOrEqual(1);
+
+    // Dashboard overview loads real MongoDB statistics
+    const dashRes = await request(app)
+      .get('/api/dashboard/overview')
+      .set('Authorization', `Bearer ${tokenA}`);
+    expect(dashRes.status).toBe(200);
+    expect(dashRes.body.data.statistics.totalFamilyMembers).toBe(1);
+    expect(dashRes.body.data.statistics.activeMedicines).toBe(1);
+  });
+
+  it('validates medicine endDate update/clear, atomic callback dispatch, retry limit, dose taken cancellation & logout revocation', async () => {
     const futureEnd = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
     const setEndRes = await request(app)
       .patch(`/api/medicines/${medicineAId}`)
@@ -378,9 +404,10 @@ describe('CareVoice End-to-End API & Security Integration Tests', () => {
     });
     expect(queuedAfterClear).toBeGreaterThan(0);
 
-    // Pick a future dose with QUEUED jobs and test caregiver TAKEN cancellation
+    // Pick a distinct future dose (not doseIds[0..2]) with QUEUED jobs and test caregiver TAKEN cancellation
     const queuedSample = await CallSchedule.findOne({
       medicineId: medicineAId,
+      doseInstanceId: { $nin: doseIds.slice(0, 3) },
       status: 'QUEUED',
       callType: { $ne: 'CALLBACK' },
     }).lean();
@@ -398,7 +425,7 @@ describe('CareVoice End-to-End API & Security Integration Tests', () => {
     });
     expect(remainingForTakenDose).toBe(0);
 
-    // Test atomic callback execution & retry ceiling on doseIds[1] (1 active callback created earlier)
+    // Test atomic callback execution & retry ceiling on doseIds[1] (1 active callback created earlier & preserved across endDate edits)
     const cbSchedule = await CallSchedule.findOne({
       doseInstanceId: doseIds[1],
       callType: 'CALLBACK',
@@ -456,32 +483,6 @@ describe('CareVoice End-to-End API & Security Integration Tests', () => {
         reason: 'Should exceed retry budget',
       });
     expect(cbOverLimit.status).toBe(409);
-  });
-
-  it('rejects unsigned webhooks and serves accurate separated report statuses + invalidates token on logout', async () => {
-    const webhookNoSig = await request(app)
-      .post('/api/voice-agent/webhook/sarvam')
-      .send({ call_id: 'fake' });
-    expect([401, 403]).toContain(webhookNoSig.status);
-
-    // Check report separation
-    const reportRes = await request(app)
-      .get('/api/reports?period=weekly')
-      .set('Authorization', `Bearer ${tokenA}`);
-    expect(reportRes.status).toBe(200);
-    expect(reportRes.body.data.summary.statusBreakdown.PATIENT_REPORTED_TAKEN).toBeGreaterThanOrEqual(
-      1
-    );
-    expect(reportRes.body.data.summary.statusBreakdown.CALLBACK_REQUESTED).toBeGreaterThanOrEqual(1);
-    expect(reportRes.body.data.summary.statusBreakdown.ESCALATED).toBeGreaterThanOrEqual(1);
-
-    // Dashboard overview loads real MongoDB statistics
-    const dashRes = await request(app)
-      .get('/api/dashboard/overview')
-      .set('Authorization', `Bearer ${tokenA}`);
-    expect(dashRes.status).toBe(200);
-    expect(dashRes.body.data.statistics.totalFamilyMembers).toBe(1);
-    expect(dashRes.body.data.statistics.activeMedicines).toBe(1);
 
     // Logout revokes JWT tokenVersion
     const logoutRes = await request(app)

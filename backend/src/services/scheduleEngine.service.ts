@@ -536,6 +536,30 @@ export async function recoverPendingCallJobs(): Promise<{
     }
   }
 
+  // Recover orphaned DISPATCHED jobs whose process died before CallLog creation
+  const orphanCutoff = new Date(now.getTime() - 2 * 60 * 1000);
+  const stuckDispatched = await CallSchedule.find({
+    status: 'DISPATCHED',
+    dispatchedAt: { $lt: orphanCutoff },
+    scheduledFor: { $gte: catchUpCutoff },
+  }).lean();
+
+  if (stuckDispatched.length > 0) {
+    const CallLogModel = (await import('../models/CallLog')).CallLog;
+    for (const orphan of stuckDispatched) {
+      const existingCall = await CallLogModel.exists({ callScheduleId: orphan._id });
+      if (!existingCall) {
+        await CallSchedule.updateOne(
+          { _id: orphan._id, status: 'DISPATCHED' },
+          {
+            $set: { status: 'QUEUED' },
+            $unset: { dispatchedAt: 1 },
+          }
+        );
+      }
+    }
+  }
+
   // Mark jobs older than 2 hours as SKIPPED so stale reminders don't blast late
   const staleResult = await CallSchedule.updateMany(
     {

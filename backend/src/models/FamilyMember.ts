@@ -14,6 +14,7 @@ export interface ICallingPreferences {
   maxRetries: number;
   retryIntervalMinutes: number;
   allowMealReminders: boolean;
+  allowMedicineReminders: boolean;
   allowConfirmationCalls: boolean;
   preferredVoiceGender: 'FEMALE' | 'MALE' | 'NEUTRAL';
 }
@@ -61,6 +62,7 @@ const familyMemberSchema = new Schema<IFamilyMember>(
       maxRetries: { type: Number, default: 2, min: 0, max: 5 },
       retryIntervalMinutes: { type: Number, default: 10, min: 5, max: 60 },
       allowMealReminders: { type: Boolean, default: true },
+      allowMedicineReminders: { type: Boolean, default: true },
       allowConfirmationCalls: { type: Boolean, default: true },
       preferredVoiceGender: {
         type: String,

@@ -33,7 +33,20 @@ export type MedicineFrequency =
 
 export type CallType = 'MEAL_REMINDER' | 'MEDICINE_REMINDER' | 'CONFIRMATION_CALL' | 'CALLBACK';
 
+export type CallLifecycleStatus =
+  | 'QUEUED'
+  | 'INITIATING'
+  | 'RINGING'
+  | 'IN_PROGRESS'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'NO_ANSWER'
+  | 'BUSY'
+  | 'REJECTED'
+  | 'CANCELLED';
+
 export type CallOutcome =
+  | 'PENDING'
   | 'ANSWERED'
   | 'NO_ANSWER'
   | 'BUSY'
@@ -41,7 +54,33 @@ export type CallOutcome =
   | 'FAILED'
   | 'COMPLETED'
   | 'CALLBACK_REQUESTED'
-  | 'ESCALATED';
+  | 'ESCALATED'
+  | 'CANCELLED';
+
+export interface VoiceCallPreflight {
+  activeProvider: 'mock' | 'sarvam';
+  configuredMode: 'mock' | 'sarvam';
+  telephonyEnabled: boolean;
+  telephonyReady: boolean;
+  missingTelephonyFields: string[];
+  webhookReady: boolean;
+  missingWebhookFields: string[];
+  webhookHttps: boolean;
+  mockSimulationAllowed: boolean;
+  liveCallingAllowed: boolean;
+  agentVersion: number;
+  callerIdMasked: string | null;
+  deploymentCheck?: {
+    verified: boolean;
+    status: 'active' | 'inactive' | 'mismatch' | 'unlisted' | 'error';
+    matchedDeploymentId?: string;
+    matchedAppVersion?: number;
+    connectionVerified: boolean;
+    phoneVerified: boolean;
+    message: string;
+    upstreamStatus?: number;
+  } | null;
+}
 
 export type CallbackStatus =
   | 'REQUESTED'
@@ -103,6 +142,7 @@ export interface FamilyMember {
     maxRetries: number;
     retryIntervalMinutes: number;
     allowMealReminders: boolean;
+    allowMedicineReminders?: boolean;
     allowConfirmationCalls: boolean;
     preferredVoiceGender: 'FEMALE' | 'MALE' | 'NEUTRAL';
   };
@@ -127,7 +167,10 @@ export interface DashboardOverviewData {
     voiceMode: 'mock' | 'sarvam';
     telephonyReady: boolean;
     missingTelephonyConfig: string[];
+    webhookReady?: boolean;
+    missingWebhookConfig?: string[];
     devDemoModeAllowed: boolean;
+    mockSimulationAllowed?: boolean;
   };
   statistics: {
     totalFamilyMembers: number;

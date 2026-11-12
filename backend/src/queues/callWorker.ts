@@ -7,7 +7,7 @@ import {
 import { executeScheduledCallJob } from '../services/call.service';
 import { logger } from '../utils/logger';
 
-async function pollDueFallbackJobs(): Promise<void> {
+export async function pollDueFallbackJobs(): Promise<void> {
   const lookAhead = new Date(Date.now() + 30 * 1000);
   const dueJobs = await CallSchedule.find({
     status: 'QUEUED',
@@ -38,6 +38,14 @@ export async function startCallWorker(): Promise<{ mode: 'bullmq-redis' | 'mongo
     await executeScheduledCallJob(payload.callScheduleId);
   });
 
-  return initQueueManager(pollDueFallbackJobs);
+  const initialized = await initQueueManager(pollDueFallbackJobs);
+  if (initialized.mode === 'mongodb-fallback') {
+    pollDueFallbackJobs().catch((err) => {
+      logger.warn('Initial fallback call poll failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+  return initialized;
 }
 

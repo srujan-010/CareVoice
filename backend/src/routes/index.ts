@@ -1,6 +1,10 @@
 import { Router } from 'express';
 import { getDatabaseHealth } from '../config/database';
-import { getSarvamWebhookReadiness, isTelephonyReady } from '../config/env';
+import {
+  getSarvamWebhookReadiness,
+  isMockSimulationAllowed,
+  isTelephonyReady,
+} from '../config/env';
 import { SUPPORTED_LANGUAGES } from '../constants/languages';
 import { getQueueStatus } from '../queues/queueManager';
 import authRoutes from './auth.routes';
@@ -14,6 +18,7 @@ import notificationRoutes from './notification.routes';
 import reportRoutes from './report.routes';
 import scheduleRoutes from './schedule.routes';
 import voiceAgentRoutes from './voiceAgent.routes';
+import voiceCallRoutes from './voiceCall.routes';
 
 const router = Router();
 
@@ -33,6 +38,7 @@ router.get('/health', (_req, res) => {
       missingFields: telephony.missingFields,
       webhookReady: webhook.ready,
       missingWebhookFields: webhook.missingFields,
+      mockSimulationAllowed: isMockSimulationAllowed(),
     },
   };
   res.json({
@@ -76,6 +82,7 @@ router.use('/family-members', familyMemberRoutes);
 router.use('/medicines', medicineRoutes);
 router.use('/schedules', scheduleRoutes);
 router.use('/calls', callRoutes);
+router.use('/voice-calls', voiceCallRoutes);
 router.use('/callbacks', callbackRoutes);
 router.use('/escalations', escalationRoutes);
 router.use('/notifications', notificationRoutes);

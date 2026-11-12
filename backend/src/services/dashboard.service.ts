@@ -1,6 +1,6 @@
 import { DateTime } from 'luxon';
 import mongoose, { Types } from 'mongoose';
-import { env, isTelephonyReady } from '../config/env';
+import { getSarvamWebhookReadiness, isMockSimulationAllowed, isTelephonyReady } from '../config/env';
 import { Family } from '../models/Family';
 import { FamilyMember } from '../models/FamilyMember';
 import { getLocalDateRangeUtc, getLocalDateString } from '../utils/timezone';
@@ -209,13 +209,18 @@ export async function getDashboardOverview(familyId: string) {
   }));
 
   const telephony = isTelephonyReady();
+  const webhook = getSarvamWebhookReadiness();
+  const mockSimulationAllowed = isMockSimulationAllowed();
 
   return {
     environment: {
       voiceMode: telephony.mode,
       telephonyReady: telephony.ready,
       missingTelephonyConfig: telephony.missingFields,
-      devDemoModeAllowed: env.ALLOW_DEV_DEMO_MODE && env.NODE_ENV === 'development',
+      webhookReady: webhook.ready,
+      missingWebhookConfig: webhook.missingFields,
+      devDemoModeAllowed: mockSimulationAllowed,
+      mockSimulationAllowed,
     },
     statistics: {
       totalFamilyMembers: members.length,

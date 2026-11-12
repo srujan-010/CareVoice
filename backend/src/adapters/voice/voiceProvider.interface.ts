@@ -1,4 +1,10 @@
-import { CallOutcome, CallType, MedicineConfirmationValue } from '../../constants/statuses';
+import {
+  CallLifecycleStatus,
+  CallOutcome,
+  CallType,
+  MedicineConfirmationValue,
+} from '../../constants/statuses';
+import { SarvamCallConnectivityStatus } from '../../models/CallLog';
 
 export type MockCallScenario =
   | 'TAKEN'
@@ -28,6 +34,8 @@ export interface VoiceCallContextPayload {
   prescribedInstructions: string;
   doseInstanceId: string;
   callType: CallType;
+  callPurpose?: string;
+  isTestCall?: boolean;
   scheduledAtIso: string;
   safetyDirectives: string[];
 }
@@ -42,13 +50,16 @@ export interface SimulatedTurn {
 export interface VoiceCallExecutionResult {
   provider: 'mock' | 'sarvam';
   mode: 'mock' | 'live';
+  callStatus?: CallLifecycleStatus;
   providerCallId: string;
   attemptId?: string;
   interactionId?: string;
-  sarvamStatus?: 'connected' | 'no_answer' | 'busy' | 'failed';
+  sarvamStatus?: SarvamCallConnectivityStatus;
   failureReason?: string;
   channelInfo?: Record<string, unknown>;
   finalAgentVariables?: Record<string, unknown>;
+  recordingUrl?: string;
+  transcriptConsentGranted?: boolean;
   outcome: CallOutcome;
   durationSeconds: number;
   mealConfirmed: boolean | null;
@@ -76,6 +87,7 @@ export interface IVoiceProvider {
     attemptId?: string;
     providerCallId: string;
     rawStatus: string;
+    httpStatus?: number;
   }>;
   simulateCall(
     context: VoiceCallContextPayload,

@@ -8,8 +8,13 @@ import {
   ArrowLeft,
   Bot,
   CheckCircle2,
+  Clock3,
+  Loader2,
   Mic,
   PhoneForwarded,
+  PhoneOff,
+  RefreshCw,
+  ShieldAlert,
   User,
   Volume2,
 } from 'lucide-react';
@@ -19,8 +24,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { EmptyState } from '@/components/ui/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
 import { API_BASE, apiRequest, getStoredToken } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import { getLanguageLabel } from '@/lib/constants';
 import { formatDateTimeInTz } from '@/lib/utils';
+import type { CallLifecycleStatus } from '@/types';
 
 interface CallDetailPayload {
   callLog: {
@@ -46,11 +53,24 @@ interface CallDetailPayload {
       scheduledAt: string;
     };
     mode: 'mock' | 'live';
+    isMock?: boolean;
+    isTestCall?: boolean;
+    callPurpose?: string;
+    callStatus?: CallLifecycleStatus;
+    statusHistory?: Array<{
+      status: CallLifecycleStatus;
+      timestamp: string;
+      source: string;
+      note?: string;
+    }>;
+    recordingConsentGranted?: boolean;
+    transcriptConsentGranted?: boolean;
     provider: string;
     attemptId?: string;
     interactionId?: string;
     sarvamStatus?: string;
     failureReason?: string;
+    providerResponseMeta?: Record<string, unknown>;
     callType: string;
     language: string;
     outcome: string;
@@ -60,6 +80,10 @@ interface CallDetailPayload {
     mealConfirmed: boolean | null;
     medicineConfirmed: string;
     aiSummary?: string;
+    queuedAt?: string;
+    initiatingAt?: string;
+    ringingAt?: string;
+    answeredAt?: string;
     startedAt?: string;
     endedAt?: string;
   };
@@ -87,6 +111,7 @@ interface CallDetailPayload {
     mimeType: string;
     durationSeconds: number;
     consentVerified: boolean;
+    provider?: string;
   } | null;
   escalations: Array<{
     _id: string;
@@ -104,39 +129,57 @@ interface CallDetailPayload {
   }>;
 }
 
+const ACTIVE_STATUSES: CallLifecycleStatus[] = [
+  'QUEUED',
+  'INITIATING',
+  'RINGING',
+  'IN_PROGRESS',
+];
+
 export default function CallDetailPage() {
   const params = useParams<{ id: string }>();
   const callId = params?.id;
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'ADMIN';
+
   const [detail, setDetail] = useState<CallDetailPayload | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadDetail = useCallback(async () => {
-    if (!callId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await apiRequest<CallDetailPayload>(`/calls/${callId}`);
-      setDetail(data);
+  const loadDetail = useCallback(
+    async (silent = false) => {
+      if (!callId) return;
+      if (!silent) setLoading(true);
+      setError(null);
+      try {
+        const data = await apiRequest<CallDetailPayload>(`/calls/${callId}`);
+        setDetail(data);
 
-      if (data.recording?.consentVerified) {
-        const token = getStoredToken();
-        const res = await fetch(`${API_BASE}/calls/${callId}/recording`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-          credentials: 'include',
-        });
-        if (res.ok && res.headers.get('content-type')?.includes('audio')) {
-          const blob = await res.blob();
-          setAudioUrl(URL.createObjectURL(blob));
+        if (
+          data.recording?.consentVerified ||
+          (data.callLog.recordingConsentGranted &&
+            data.callLog.recordingStatus === 'AVAILABLE')
+        ) {
+          const token = getStoredToken();
+          const res = await fetch(`${API_BASE}/calls/${callId}/recording`, {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            credentials: 'include',
+          });
+          if (res.ok && res.headers.get('content-type')?.includes('audio')) {
+            const blob = await res.blob();
+            setAudioUrl(URL.createObjectURL(blob));
+          }
         }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Unable to load call details');
+      } finally {
+        if (!silent) setLoading(false);
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to load call details');
-    } finally {
-      setLoading(false);
-    }
-  }, [callId]);
+    },
+    [callId]
+  );
 
   useEffect(() => {
     loadDetail();
@@ -145,6 +188,37 @@ export default function CallDetailPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadDetail]);
+
+  const currentLifecycle = detail?.callLog.callStatus;
+  const isCallActive = Boolean(
+    currentLifecycle && ACTIVE_STATUSES.includes(currentLifecycle)
+  );
+
+  useEffect(() => {
+    if (!isCallActive) return;
+    const timer = setInterval(() => {
+      loadDetail(true);
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [isCallActive, loadDetail]);
+
+  const handleCancelCall = async () => {
+    if (!callId) return;
+    setCancelling(true);
+    try {
+      await apiRequest(`/voice-calls/${callId}/cancel`, {
+        method: 'POST',
+        body: JSON.stringify({
+          reason: 'Manually cancelled by Admin from Call Detail page',
+        }),
+      });
+      await loadDetail(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to cancel active call');
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -169,6 +243,8 @@ export default function CallDetailPage() {
   }
 
   const { callLog, conversation, recording, escalations, callbacks } = detail;
+  const isMockCall = callLog.isMock ?? callLog.mode === 'mock';
+  const lifecycleStatus = callLog.callStatus ?? 'COMPLETED';
 
   return (
     <div className="space-y-6 animate-fade-up">
@@ -184,16 +260,52 @@ export default function CallDetailPage() {
               <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
                 {callLog.familyMemberId?.fullName || 'Patient'} — Voice Call Detail
               </h1>
-              <Badge variant={callLog.mode === 'live' ? 'success' : 'default'}>
-                {callLog.mode.toUpperCase()} MODE
+              <Badge variant={isMockCall ? 'warning' : 'success'}>
+                {isMockCall ? 'MOCK SANDBOX' : 'LIVE SARVAM'}
               </Badge>
-              <Badge variant="indigo">{callLog.outcome}</Badge>
+              {callLog.isTestCall ? <Badge variant="default">TEST CALL</Badge> : null}
+              <Badge
+                variant={
+                  lifecycleStatus === 'COMPLETED'
+                    ? 'success'
+                    : lifecycleStatus === 'FAILED' || lifecycleStatus === 'REJECTED'
+                      ? 'danger'
+                      : lifecycleStatus === 'NO_ANSWER' ||
+                          lifecycleStatus === 'BUSY' ||
+                          lifecycleStatus === 'CANCELLED'
+                        ? 'warning'
+                        : 'indigo'
+                }
+              >
+                {isCallActive ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                {lifecycleStatus}
+              </Badge>
+              <Badge variant="neutral">Outcome: {callLog.outcome}</Badge>
             </div>
             <p className="text-sm text-slate-500">
               {callLog.medicineId?.name} ({callLog.medicineId?.dosage}) •{' '}
               {callLog.doseInstanceId?.slotLabel} • {getLanguageLabel(callLog.language)}
+              {callLog.callPurpose ? ` • ${callLog.callPurpose}` : ''}
             </p>
           </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => loadDetail()}>
+            <RefreshCw className="h-3.5 w-3.5" />
+            Refresh
+          </Button>
+          {isAdmin && isCallActive ? (
+            <Button
+              variant="softDestructive"
+              size="sm"
+              onClick={handleCancelCall}
+              disabled={cancelling}
+            >
+              <PhoneOff className="h-3.5 w-3.5" />
+              {cancelling ? 'Cancelling...' : 'Mark Cancelled'}
+            </Button>
+          ) : null}
         </div>
       </div>
 
@@ -249,7 +361,7 @@ export default function CallDetailPage() {
 
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Call Telemetry</CardTitle>
+            <CardTitle className="text-sm">Call Telemetry & Provider State</CardTitle>
           </CardHeader>
           <CardContent className="text-xs text-slate-600 space-y-1">
             <p>
@@ -257,15 +369,27 @@ export default function CallDetailPage() {
               {formatDateTimeInTz(callLog.startedAt, callLog.familyMemberId?.timezone)}
             </p>
             <p>
+              <strong>Ended:</strong>{' '}
+              {callLog.endedAt
+                ? formatDateTimeInTz(callLog.endedAt, callLog.familyMemberId?.timezone)
+                : 'Awaiting completion'}
+            </p>
+            <p>
               <strong>Duration:</strong> {callLog.durationSeconds} seconds
             </p>
             <p>
               <strong>Recording Consent:</strong>{' '}
-              {callLog.familyMemberId?.recordingConsentStatus}
+              {callLog.recordingConsentGranted ? 'GRANTED' : 'NOT GRANTED'} (Member setting:{' '}
+              {callLog.familyMemberId?.recordingConsentStatus})
             </p>
             {callLog.attemptId ? (
               <p className="truncate">
                 <strong>Sarvam Attempt ID:</strong> {callLog.attemptId}
+              </p>
+            ) : null}
+            {callLog.sarvamStatus ? (
+              <p>
+                <strong>Sarvam Webhook Status:</strong> {callLog.sarvamStatus}
               </p>
             ) : null}
             {callLog.interactionId ? (
@@ -275,12 +399,45 @@ export default function CallDetailPage() {
             ) : null}
             {callLog.failureReason ? (
               <p className="text-rose-700">
-                <strong>Failure Reason:</strong> {callLog.failureReason}
+                <strong>Failure / Cancel Reason:</strong> {callLog.failureReason}
               </p>
             ) : null}
           </CardContent>
         </Card>
       </div>
+
+      {/* Call Lifecycle Timeline */}
+      {callLog.statusHistory && callLog.statusHistory.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Clock3 className="h-4 w-4 text-blue-600" />
+              Real-Time Call Lifecycle Timeline
+            </CardTitle>
+            <CardDescription>
+              Audit trail of transitions across QUEUED, INITIATING, RINGING, IN_PROGRESS, and
+              terminal events
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2.5">
+            {callLog.statusHistory.map((evt, idx) => (
+              <div
+                key={idx}
+                className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-xl border border-sky-100 bg-sky-50/40 px-4 py-2.5 text-xs"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="default">{evt.status}</Badge>
+                  <Badge variant="neutral">{evt.source}</Badge>
+                  {evt.note ? <span className="text-slate-700">{evt.note}</span> : null}
+                </div>
+                <span className="text-slate-500 shrink-0">
+                  {formatDateTimeInTz(evt.timestamp, callLog.familyMemberId?.timezone)}
+                </span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
 
       {/* AI Summary & Audio Recording Player */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -332,11 +489,11 @@ export default function CallDetailPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            {audioUrl && recording ? (
+            {audioUrl && (recording?.consentVerified || callLog.recordingConsentGranted) ? (
               <div className="rounded-2xl border border-sky-200 bg-sky-50/60 p-4 space-y-2">
                 <div className="flex items-center justify-between text-xs text-slate-600">
                   <span className="font-semibold text-blue-700">
-                    Recording verified ({recording.durationSeconds}s)
+                    Recording verified ({recording?.durationSeconds ?? callLog.durationSeconds}s)
                   </span>
                   <Badge variant="success">Consent Granted</Badge>
                 </div>
@@ -344,12 +501,16 @@ export default function CallDetailPage() {
               </div>
             ) : (
               <EmptyState
-                icon={Mic}
-                title="Recording unavailable"
+                icon={callLog.recordingStatus === 'CONSENT_DENIED' ? ShieldAlert : Mic}
+                title={
+                  callLog.recordingStatus === 'CONSENT_DENIED'
+                    ? 'Recording & Verbatim Transcript Withheld'
+                    : 'Recording unavailable'
+                }
                 description={
                   callLog.recordingStatus === 'CONSENT_DENIED'
-                    ? 'Audio was not captured because patient recording consent is not GRANTED.'
-                    : 'No audio recording is attached to this call.'
+                    ? 'Patient allowed automated voice calling, but CALL_RECORDING consent is not GRANTED. Audio and verbatim transcripts are withheld.'
+                    : 'No audio recording is available yet for this call.'
                 }
               />
             )}
@@ -368,9 +529,17 @@ export default function CallDetailPage() {
         <CardContent>
           {!conversation || conversation.turns.length === 0 ? (
             <EmptyState
-              icon={Bot}
-              title="No conversation turns recorded"
-              description="Unanswered, busy, or rejected calls do not have spoken dialogue."
+              icon={callLog.recordingStatus === 'CONSENT_DENIED' ? ShieldAlert : Bot}
+              title={
+                callLog.recordingStatus === 'CONSENT_DENIED'
+                  ? 'Transcript withheld — recording consent not granted'
+                  : 'No conversation turns recorded'
+              }
+              description={
+                callLog.recordingStatus === 'CONSENT_DENIED'
+                  ? 'Grant CALL_RECORDING consent for this family member if verbatim call transcripts and recordings should be stored.'
+                  : 'Unanswered, busy, rejected, or still-dialing calls do not have spoken dialogue.'
+              }
             />
           ) : (
             <div className="space-y-3">
@@ -477,4 +646,3 @@ export default function CallDetailPage() {
     </div>
   );
 }
-

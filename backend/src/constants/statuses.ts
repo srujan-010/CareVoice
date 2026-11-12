@@ -61,7 +61,22 @@ export const CALL_SCHEDULE_STATUSES = [
 ] as const;
 export type CallScheduleStatus = (typeof CALL_SCHEDULE_STATUSES)[number];
 
+export const CALL_LIFECYCLE_STATUSES = [
+  'QUEUED',
+  'INITIATING',
+  'RINGING',
+  'IN_PROGRESS',
+  'COMPLETED',
+  'FAILED',
+  'NO_ANSWER',
+  'BUSY',
+  'REJECTED',
+  'CANCELLED',
+] as const;
+export type CallLifecycleStatus = (typeof CALL_LIFECYCLE_STATUSES)[number];
+
 export const CALL_OUTCOMES = [
+  'PENDING',
   'ANSWERED',
   'NO_ANSWER',
   'BUSY',
@@ -70,6 +85,7 @@ export const CALL_OUTCOMES = [
   'COMPLETED',
   'CALLBACK_REQUESTED',
   'ESCALATED',
+  'CANCELLED',
 ] as const;
 export type CallOutcome = (typeof CALL_OUTCOMES)[number];
 

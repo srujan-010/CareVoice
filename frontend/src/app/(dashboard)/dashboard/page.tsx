@@ -188,14 +188,25 @@ export default function DashboardOverviewPage() {
             </p>
             <p className="text-xs text-slate-500">
               {data.environment.telephonyReady
-                ? 'Sarvam Voice Telephony is configured and active.'
-                : 'Real telephone dialing is safely disabled until Sarvam credentials and phone number are configured. Mock simulation is available for testing.'}
+                ? 'Sarvam Vobiz telephony is enabled and ready for scheduled calls and Admin real test calls.'
+                : `Real telephone dialing is safely locked (${
+                    data.environment.missingTelephonyConfig?.join(', ') || 'mock mode active'
+                  }).${
+                    data.environment.mockSimulationAllowed
+                      ? ' Mock sandbox simulation is available in Voice Calls.'
+                      : ''
+                  }`}
             </p>
           </div>
         </div>
-        <Button asChild variant="outline" size="sm">
-          <Link href="/settings">Configure Voice & Safety</Link>
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button asChild variant="outline" size="sm">
+            <Link href="/calls">Voice Calls</Link>
+          </Button>
+          <Button asChild variant="outline" size="sm">
+            <Link href="/settings">Voice &amp; Safety</Link>
+          </Button>
+        </div>
       </div>
 
       {/* 8 KPI Cards */}

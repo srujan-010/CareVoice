@@ -1,16 +1,20 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
+  AlertTriangle,
+  CheckCircle2,
   FileText,
   Mic,
   PhoneCall,
   RefreshCw,
+  ShieldCheck,
   Sparkles,
 } from 'lucide-react';
 import { MockCallSimulatorDialog } from '@/components/calls/MockCallSimulatorDialog';
+import { RealTestCallDialog } from '@/components/calls/RealTestCallDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -21,7 +25,7 @@ import { apiRequest } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { getLanguageLabel } from '@/lib/constants';
 import { formatDateTimeInTz } from '@/lib/utils';
-import type { FamilyMember } from '@/types';
+import type { CallLifecycleStatus, FamilyMember, VoiceCallPreflight } from '@/types';
 
 interface CallLogRow {
   _id: string;
@@ -33,49 +37,103 @@ interface CallLogRow {
   language: string;
   scheduledAt: string;
   startedAt?: string;
+  endedAt?: string;
   durationSeconds: number;
+  callStatus?: CallLifecycleStatus;
   outcome: string;
   recordingStatus: string;
   transcriptAvailable: boolean;
   mealConfirmed: boolean | null;
   medicineConfirmed: string;
   mode: 'mock' | 'live';
+  isMock?: boolean;
+  isTestCall?: boolean;
+  callPurpose?: string;
+  attemptId?: string;
+}
+
+const ACTIVE_STATUSES: CallLifecycleStatus[] = [
+  'QUEUED',
+  'INITIATING',
+  'RINGING',
+  'IN_PROGRESS',
+];
+
+function getLifecycleVariant(status?: CallLifecycleStatus) {
+  if (status === 'COMPLETED') return 'success' as const;
+  if (status === 'FAILED' || status === 'REJECTED') return 'danger' as const;
+  if (status === 'NO_ANSWER' || status === 'BUSY' || status === 'CANCELLED') {
+    return 'warning' as const;
+  }
+  return 'indigo' as const;
 }
 
 export default function CallsPage() {
   const router = useRouter();
   const { user } = useAuth();
-  const canSimulate = user?.role === 'ADMIN' || user?.role === 'CAREGIVER';
+  const isAdmin = user?.role === 'ADMIN';
+  const canSimulateRole = user?.role === 'ADMIN' || user?.role === 'CAREGIVER';
 
   const [calls, setCalls] = useState<CallLogRow[]>([]);
   const [members, setMembers] = useState<FamilyMember[]>([]);
+  const [preflight, setPreflight] = useState<VoiceCallPreflight | null>(null);
   const [memberFilter, setMemberFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
   const [outcomeFilter, setOutcomeFilter] = useState('');
+  const [modeFilter, setModeFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [simOpen, setSimOpen] = useState(false);
+  const [realCallOpen, setRealCallOpen] = useState(false);
 
-  const loadCalls = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (memberFilter) params.set('familyMemberId', memberFilter);
-      if (outcomeFilter) params.set('outcome', outcomeFilter);
-      const q = params.toString() ? `?${params.toString()}` : '';
+  const loadCalls = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoading(true);
+      try {
+        const params = new URLSearchParams();
+        if (memberFilter) params.set('familyMemberId', memberFilter);
+        if (statusFilter) params.set('callStatus', statusFilter);
+        if (outcomeFilter) params.set('outcome', outcomeFilter);
+        if (modeFilter) params.set('mode', modeFilter);
+        const q = params.toString() ? `?${params.toString()}` : '';
 
-      const [callList, memberList] = await Promise.all([
-        apiRequest<CallLogRow[]>(`/calls${q}`),
-        apiRequest<FamilyMember[]>('/family-members'),
-      ]);
-      setCalls(callList);
-      setMembers(memberList);
-    } finally {
-      setLoading(false);
-    }
-  }, [memberFilter, outcomeFilter]);
+        const [callList, memberList, preflightRes] = await Promise.all([
+          apiRequest<CallLogRow[]>(`/calls${q}`),
+          apiRequest<FamilyMember[]>('/family-members'),
+          apiRequest<VoiceCallPreflight>('/voice-calls/preflight'),
+        ]);
+        setCalls(callList);
+        setMembers(memberList);
+        setPreflight(preflightRes);
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [memberFilter, statusFilter, outcomeFilter, modeFilter]
+  );
 
   useEffect(() => {
     loadCalls();
   }, [loadCalls]);
+
+  const hasActiveCall = useMemo(
+    () =>
+      calls.some(
+        (c) => c.callStatus && ACTIVE_STATUSES.includes(c.callStatus)
+      ),
+    [calls]
+  );
+
+  // Auto-poll silently when any call is actively dialing/ringing/in-progress
+  useEffect(() => {
+    if (!hasActiveCall) return;
+    const timer = setInterval(() => {
+      loadCalls(true);
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [hasActiveCall, loadCalls]);
+
+  const mockSimulationAllowed =
+    canSimulateRole && (preflight?.mockSimulationAllowed ?? false);
 
   return (
     <div className="space-y-6 animate-fade-up">
@@ -85,31 +143,80 @@ export default function CallsPage() {
             Voice Call Management
           </h1>
           <p className="text-sm text-slate-500">
-            Inspect call logs, multilingual transcripts, audio recordings, and simulate calls in
-            sandbox mode.
+            Separate live Sarvam Vobiz outbound calling (Admin-only) from dev Mock Voice Sandbox
+            testing, with live call lifecycle tracking and recordings.
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
-          <Button variant="outline" onClick={loadCalls}>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <Button variant="outline" onClick={() => loadCalls()}>
             <RefreshCw className="h-4 w-4" />
           </Button>
-          {canSimulate ? (
-            <Button onClick={() => setSimOpen(true)}>
-              <Sparkles className="h-4 w-4" />
+          {mockSimulationAllowed ? (
+            <Button variant="outline" onClick={() => setSimOpen(true)}>
+              <Sparkles className="h-4 w-4 text-amber-600" />
               Simulate Mock Call
+            </Button>
+          ) : null}
+          {isAdmin ? (
+            <Button onClick={() => setRealCallOpen(true)}>
+              <PhoneCall className="h-4 w-4" />
+              Place Real Test Call
             </Button>
           ) : null}
         </div>
       </div>
 
+      {/* Calling Mode & Readiness Banner */}
+      {preflight ? (
+        preflight.liveCallingAllowed ? (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50/70 px-5 py-3.5">
+            <div className="flex items-start gap-3">
+              <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600 mt-0.5" />
+              <div className="text-xs sm:text-sm">
+                <p className="font-bold text-emerald-900">
+                  Live Sarvam Vobiz Outbound Telephony Enabled
+                </p>
+                <p className="text-emerald-800">
+                  Caller ID: {preflight.callerIdMasked || 'Configured'} • Agent v
+                  {preflight.agentVersion} • HTTPS Webhook Ready
+                  {mockSimulationAllowed
+                    ? ' • Dev Mock Sandbox also active (all simulated logs are tagged MOCK)'
+                    : ' • Mock Sandbox locked'}
+                </p>
+              </div>
+            </div>
+            <Badge variant="success">LIVE TELEPHONY READY</Badge>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50/80 px-5 py-3.5">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600 mt-0.5" />
+              <div className="text-xs sm:text-sm">
+                <p className="font-bold text-amber-900">
+                  Real Outbound Calling Locked — Mock Voice Sandbox Mode
+                </p>
+                <p className="text-amber-800">
+                  Missing backend flags/config:{' '}
+                  {[
+                    ...preflight.missingTelephonyFields,
+                    ...preflight.missingWebhookFields,
+                  ].join(', ') || 'None'}
+                  . Admins can still run preflight deployment checks inside Place Real Test Call.
+                </p>
+              </div>
+            </div>
+            <Badge variant="warning">MOCK SANDBOX</Badge>
+          </div>
+        )
+      ) : null}
+
       {/* Filters */}
       <Card>
-        <CardContent className="p-4 flex flex-col sm:flex-row gap-3">
+        <CardContent className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <SelectNative
             value={memberFilter}
             onChange={(e) => setMemberFilter(e.target.value)}
-            className="sm:w-64"
           >
             <option value="">All Family Members</option>
             {members.map((m) => (
@@ -119,17 +226,42 @@ export default function CallsPage() {
             ))}
           </SelectNative>
           <SelectNative
+            value={modeFilter}
+            onChange={(e) => setModeFilter(e.target.value)}
+          >
+            <option value="">All Modes (Mock & Live)</option>
+            <option value="live">Live Sarvam Calls Only</option>
+            <option value="mock">Mock Sandbox Only</option>
+          </SelectNative>
+          <SelectNative
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+          >
+            <option value="">All Lifecycle Stages</option>
+            <option value="QUEUED">Queued</option>
+            <option value="INITIATING">Initiating</option>
+            <option value="RINGING">Ringing</option>
+            <option value="IN_PROGRESS">In Progress</option>
+            <option value="COMPLETED">Completed</option>
+            <option value="NO_ANSWER">No Answer</option>
+            <option value="BUSY">Busy</option>
+            <option value="REJECTED">Rejected</option>
+            <option value="CANCELLED">Cancelled</option>
+            <option value="FAILED">Failed</option>
+          </SelectNative>
+          <SelectNative
             value={outcomeFilter}
             onChange={(e) => setOutcomeFilter(e.target.value)}
-            className="sm:w-56"
           >
             <option value="">All Outcomes</option>
+            <option value="PENDING">Pending Webhook</option>
             <option value="COMPLETED">Completed</option>
-            <option value="ANSWERED">Answered</option>
+            <option value="ANSWERED">Answered (Dose Unconfirmed)</option>
             <option value="CALLBACK_REQUESTED">Callback Requested</option>
             <option value="NO_ANSWER">No Answer</option>
             <option value="BUSY">Busy</option>
             <option value="REJECTED">Rejected</option>
+            <option value="CANCELLED">Cancelled</option>
             <option value="FAILED">Failed</option>
             <option value="ESCALATED">Escalated</option>
           </SelectNative>
@@ -145,12 +277,17 @@ export default function CallsPage() {
         <EmptyState
           icon={PhoneCall}
           title="No voice calls logged yet"
-          description="Use the Mock Call Simulator to test Telugu, Hindi, Marathi, or English medicine reminder conversations."
+          description="Admins can initiate a preflight-verified real Sarvam test call, or caregivers can simulate sandbox dialogues when mock mode is enabled."
           action={
-            canSimulate ? (
-              <Button onClick={() => setSimOpen(true)}>
+            isAdmin ? (
+              <Button onClick={() => setRealCallOpen(true)}>
+                <PhoneCall className="h-4 w-4" />
+                Place Real Test Call
+              </Button>
+            ) : mockSimulationAllowed ? (
+              <Button variant="outline" onClick={() => setSimOpen(true)}>
                 <Sparkles className="h-4 w-4" />
-                Simulate First Call
+                Simulate Mock Call
               </Button>
             ) : undefined
           }
@@ -163,91 +300,107 @@ export default function CallsPage() {
                 <tr className="border-b border-sky-100 bg-sky-50/60 text-xs font-bold text-slate-600">
                   <th className="px-4 py-3">Patient & Phone</th>
                   <th className="px-4 py-3">Medicine & Dose</th>
-                  <th className="px-4 py-3">Type & Mode</th>
-                  <th className="px-4 py-3">Scheduled / Actual</th>
+                  <th className="px-4 py-3">Type & Source</th>
+                  <th className="px-4 py-3">Scheduled / Started</th>
                   <th className="px-4 py-3">Duration</th>
-                  <th className="px-4 py-3">Outcome</th>
+                  <th className="px-4 py-3">Lifecycle & Outcome</th>
                   <th className="px-4 py-3">Language</th>
                   <th className="px-4 py-3">Media</th>
                   <th className="px-4 py-3 text-right">Details</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-sky-100">
-                {calls.map((c) => (
-                  <tr key={c._id} className="hover:bg-sky-50/40 transition-colors">
-                    <td className="px-4 py-3">
-                      <p className="font-bold text-slate-900">
-                        {c.familyMemberId?.fullName || 'Patient'}
-                      </p>
-                      <p className="text-xs text-slate-500">{c.phoneNumber}</p>
-                    </td>
-                    <td className="px-4 py-3">
-                      <p className="font-semibold text-slate-800">
-                        {c.medicineId?.name || 'Medicine'} ({c.medicineId?.dosage || ''})
-                      </p>
-                      <p className="text-xs text-slate-500">
-                        {c.doseInstanceId?.slotLabel || 'Dose'}
-                      </p>
-                    </td>
-                    <td className="px-4 py-3">
-                      <p className="text-xs font-semibold text-slate-700">
-                        {c.callType.replace(/_/g, ' ')}
-                      </p>
-                      <Badge variant={c.mode === 'live' ? 'success' : 'default'}>
-                        {c.mode.toUpperCase()}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-slate-600">
-                      <p>Sch: {formatDateTimeInTz(c.scheduledAt, c.familyMemberId?.timezone)}</p>
-                      <p>Act: {formatDateTimeInTz(c.startedAt, c.familyMemberId?.timezone)}</p>
-                    </td>
-                    <td className="px-4 py-3 font-semibold text-slate-700">
-                      {c.durationSeconds}s
-                    </td>
-                    <td className="px-4 py-3">
-                      <Badge
-                        variant={
-                          c.outcome === 'COMPLETED'
-                            ? 'success'
-                            : c.outcome === 'ESCALATED' || c.outcome === 'FAILED'
-                              ? 'danger'
-                              : c.outcome === 'CALLBACK_REQUESTED'
-                                ? 'indigo'
-                                : 'warning'
-                        }
-                      >
-                        {c.outcome}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-slate-700">
-                      {getLanguageLabel(c.language)}
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-1.5">
-                        <Badge
-                          variant={c.recordingStatus === 'AVAILABLE' ? 'success' : 'neutral'}
-                        >
-                          <Mic className="h-3 w-3" />
-                          {c.recordingStatus === 'AVAILABLE' ? 'Audio' : c.recordingStatus}
-                        </Badge>
-                        {c.transcriptAvailable ? (
-                          <Badge variant="default">
-                            <FileText className="h-3 w-3" />
-                            Text
+                {calls.map((c) => {
+                  const isMockRow = c.isMock ?? c.mode === 'mock';
+                  const lifecycle = c.callStatus ?? 'COMPLETED';
+                  return (
+                    <tr key={c._id} className="hover:bg-sky-50/40 transition-colors">
+                      <td className="px-4 py-3">
+                        <p className="font-bold text-slate-900">
+                          {c.familyMemberId?.fullName || 'Patient'}
+                        </p>
+                        <p className="text-xs text-slate-500">{c.phoneNumber}</p>
+                      </td>
+                      <td className="px-4 py-3">
+                        <p className="font-semibold text-slate-800">
+                          {c.medicineId?.name || 'Medicine'} ({c.medicineId?.dosage || ''})
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          {c.doseInstanceId?.slotLabel || 'Dose'}
+                        </p>
+                      </td>
+                      <td className="px-4 py-3 space-y-1">
+                        <p className="text-xs font-semibold text-slate-700">
+                          {c.callType.replace(/_/g, ' ')}
+                        </p>
+                        <div className="flex flex-wrap gap-1">
+                          <Badge variant={isMockRow ? 'warning' : 'success'}>
+                            {isMockRow ? 'MOCK' : 'LIVE SARVAM'}
                           </Badge>
-                        ) : null}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <Button asChild size="sm" variant="secondary">
-                        <Link href={`/calls/${c._id}`}>Inspect</Link>
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
+                          {c.isTestCall ? <Badge variant="default">TEST</Badge> : null}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-600">
+                        <p>Sch: {formatDateTimeInTz(c.scheduledAt, c.familyMemberId?.timezone)}</p>
+                        <p>Act: {formatDateTimeInTz(c.startedAt, c.familyMemberId?.timezone)}</p>
+                      </td>
+                      <td className="px-4 py-3 font-semibold text-slate-700">
+                        {c.durationSeconds}s
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-col items-start gap-1">
+                          <Badge variant={getLifecycleVariant(lifecycle)}>{lifecycle}</Badge>
+                          <span className="text-[11px] text-slate-500">
+                            Outcome: {c.outcome}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-700">
+                        {getLanguageLabel(c.language)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5">
+                          <Badge
+                            variant={
+                              c.recordingStatus === 'AVAILABLE'
+                                ? 'success'
+                                : c.recordingStatus === 'CONSENT_DENIED'
+                                  ? 'warning'
+                                  : 'neutral'
+                            }
+                          >
+                            <Mic className="h-3 w-3" />
+                            {c.recordingStatus === 'AVAILABLE'
+                              ? 'Audio'
+                              : c.recordingStatus === 'CONSENT_DENIED'
+                                ? 'No Consent'
+                                : c.recordingStatus}
+                          </Badge>
+                          {c.transcriptAvailable ? (
+                            <Badge variant="default">
+                              <FileText className="h-3 w-3" />
+                              Text
+                            </Badge>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <Button asChild size="sm" variant="secondary">
+                          <Link href={`/calls/${c._id}`}>Inspect</Link>
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
+          {!isAdmin ? (
+            <div className="border-t border-sky-100 bg-sky-50/40 px-4 py-2.5 text-[11px] text-slate-500 flex items-center gap-1.5">
+              <ShieldCheck className="h-3.5 w-3.5 text-blue-600" />
+              Real outbound phone calls can only be initiated by an authorized ADMIN user.
+            </div>
+          ) : null}
         </Card>
       )}
 
@@ -259,7 +412,15 @@ export default function CallsPage() {
           if (newId) router.push(`/calls/${newId}`);
         }}
       />
+
+      <RealTestCallDialog
+        open={realCallOpen}
+        onOpenChange={setRealCallOpen}
+        onCallStartedOrUpdated={() => {
+          loadCalls(true);
+        }}
+        onInspectCall={(id) => router.push(`/calls/${id}`)}
+      />
     </div>
   );
 }
-

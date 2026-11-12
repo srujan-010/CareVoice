@@ -49,6 +49,7 @@ export default function SettingsPage() {
       missingFields: string[];
       webhookReady?: boolean;
       missingWebhookFields?: string[];
+      mockSimulationAllowed?: boolean;
     };
   } | null>(null);
 
@@ -64,6 +65,7 @@ export default function SettingsPage() {
             missingFields: string[];
             webhookReady?: boolean;
             missingWebhookFields?: string[];
+            mockSimulationAllowed?: boolean;
           };
         }>('/health'),
       ]);
@@ -245,7 +247,15 @@ export default function SettingsPage() {
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-slate-700">Authenticated Webhook</span>
                 <Badge variant={healthInfo?.telephony?.webhookReady ? 'success' : 'warning'}>
-                  {healthInfo?.telephony?.webhookReady ? 'Ready' : 'Not Configured'}
+                  {healthInfo?.telephony?.webhookReady ? 'HTTPS Ready' : 'Not Configured'}
+                </Badge>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-slate-700">Mock Sandbox Mode</span>
+                <Badge variant={healthInfo?.telephony?.mockSimulationAllowed ? 'warning' : 'neutral'}>
+                  {healthInfo?.telephony?.mockSimulationAllowed
+                    ? 'Allowed (Dev/Testing)'
+                    : 'Locked in Production'}
                 </Badge>
               </div>
             </div>

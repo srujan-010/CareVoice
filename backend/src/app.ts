@@ -6,6 +6,7 @@ import { env } from './config/env';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 import { apiRateLimiter } from './middleware/rateLimit.middleware';
 import routes from './routes';
+import { ForbiddenError } from './utils/errors';
 
 export function createApp() {
   const app = express();
@@ -28,7 +29,7 @@ export function createApp() {
         if (!normalizedOrigin || allowedOrigins.includes(normalizedOrigin)) {
           callback(null, true);
         } else {
-          callback(new Error('Origin not allowed by CORS'));
+          callback(new ForbiddenError('Origin not allowed by CORS'));
         }
       },
       credentials: true,

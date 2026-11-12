@@ -39,6 +39,7 @@ const callingPreferencesSchema = z.object({
   maxRetries: z.number().int().min(0).max(5).optional(),
   retryIntervalMinutes: z.number().int().min(5).max(60).optional(),
   allowMealReminders: z.boolean().optional(),
+  allowMedicineReminders: z.boolean().optional(),
   allowConfirmationCalls: z.boolean().optional(),
   preferredVoiceGender: z.enum(['FEMALE', 'MALE', 'NEUTRAL']).optional(),
 });

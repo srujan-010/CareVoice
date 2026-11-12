@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from 'express';
-import { CallOutcome, CallType } from '../constants/statuses';
+import { CallLifecycleStatus, CallOutcome, CallType } from '../constants/statuses';
 import * as callService from '../services/call.service';
 import { UnauthorizedError } from '../utils/errors';
 
@@ -10,13 +10,21 @@ export async function listCalls(req: Request, res: Response, next: NextFunction)
       typeof req.query.familyMemberId === 'string' ? req.query.familyMemberId : undefined;
     const outcome =
       typeof req.query.outcome === 'string' ? (req.query.outcome as CallOutcome) : undefined;
+    const callStatus =
+      typeof req.query.callStatus === 'string'
+        ? (req.query.callStatus as CallLifecycleStatus)
+        : undefined;
     const callType =
       typeof req.query.callType === 'string' ? (req.query.callType as CallType) : undefined;
+    const mode =
+      req.query.mode === 'mock' || req.query.mode === 'live' ? req.query.mode : undefined;
 
     const calls = await callService.listCalls(req.auth.familyId, {
       familyMemberId,
       outcome,
+      callStatus,
       callType,
+      mode,
     });
     res.json({ success: true, data: calls });
   } catch (err) {
@@ -58,6 +66,14 @@ export async function streamRecording(req: Request, res: Response, next: NextFun
       req.auth.familyId,
       String(req.params.id)
     );
+
+    if (recording.audioBuffer) {
+      res.setHeader('Content-Type', recording.mimeType || 'audio/wav');
+      res.setHeader('Content-Length', recording.audioBuffer.length);
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.send(recording.audioBuffer);
+      return;
+    }
 
     if (recording.audioDataBase64) {
       const buffer = Buffer.from(recording.audioDataBase64, 'base64');

@@ -160,6 +160,7 @@ export async function createFamilyMember(
             maxRetries: input.callingPreferences?.maxRetries ?? 2,
             retryIntervalMinutes: input.callingPreferences?.retryIntervalMinutes ?? 10,
             allowMealReminders: input.callingPreferences?.allowMealReminders ?? true,
+            allowMedicineReminders: input.callingPreferences?.allowMedicineReminders ?? true,
             allowConfirmationCalls: input.callingPreferences?.allowConfirmationCalls ?? true,
             preferredVoiceGender: input.callingPreferences?.preferredVoiceGender ?? 'FEMALE',
           },

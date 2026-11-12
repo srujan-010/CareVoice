@@ -1,5 +1,8 @@
 import { MockVoiceProvider } from '../adapters/voice/mockVoice.provider';
-import { SarvamVoiceProvider } from '../adapters/voice/sarvamVoice.provider';
+import {
+  SarvamDeploymentVerificationResult,
+  SarvamVoiceProvider,
+} from '../adapters/voice/sarvamVoice.provider';
 import {
   IVoiceProvider,
   MockCallScenario,
@@ -7,8 +10,17 @@ import {
   VoiceCallContextPayload,
   VoiceCallExecutionResult,
 } from '../adapters/voice/voiceProvider.interface';
-import { env, getSarvamWebhookReadiness, isTelephonyReady } from '../config/env';
-import { CallOutcome, MedicineConfirmationValue } from '../constants/statuses';
+import {
+  env,
+  getSarvamWebhookReadiness,
+  isMockSimulationAllowed,
+  isTelephonyReady,
+} from '../config/env';
+import {
+  CallLifecycleStatus,
+  CallOutcome,
+  MedicineConfirmationValue,
+} from '../constants/statuses';
 import { SarvamCallConnectivityStatus } from '../models/CallLog';
 import { normalizeAndValidateE164 } from '../utils/phone';
 
@@ -29,6 +41,10 @@ export interface SarvamTranscriptTurnInput {
 export interface SarvamOutboundWebhookPayload {
   attempt_id: string;
   status: SarvamCallConnectivityStatus;
+  event_id?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  recording_url?: string | null;
   channel_info?: Record<string, unknown> | null;
   duration?: number | null;
   interaction_id?: string | null;
@@ -101,12 +117,34 @@ function readExplicitMedicineConfirmation(
   return 'UNCONFIRMED';
 }
 
+export function mapProviderRawStatusToLifecycle(rawStatus?: string): CallLifecycleStatus {
+  const normalized = (rawStatus || '').trim().toLowerCase();
+  if (normalized === 'queued') return 'QUEUED';
+  if (normalized === 'ringing' || normalized === 'ring') return 'RINGING';
+  if (normalized === 'in_progress' || normalized === 'answered' || normalized === 'ongoing') {
+    return 'IN_PROGRESS';
+  }
+  if (normalized === 'completed' || normalized === 'connected') return 'COMPLETED';
+  if (normalized === 'no_answer') return 'NO_ANSWER';
+  if (normalized === 'busy') return 'BUSY';
+  if (normalized === 'rejected' || normalized === 'declined') return 'REJECTED';
+  if (normalized === 'cancelled' || normalized === 'canceled') return 'CANCELLED';
+  if (normalized === 'failed' || normalized === 'error') return 'FAILED';
+  return 'INITIATING';
+}
+
 export function getActiveVoiceProvider(): IVoiceProvider {
   const readiness = isTelephonyReady();
   if (readiness.ready && env.VOICE_PROVIDER_MODE === 'sarvam') {
     return sarvamProvider;
   }
   return mockProvider;
+}
+
+export function maskPhoneNumber(phone: string): string {
+  const trimmed = phone.trim();
+  if (trimmed.length <= 6) return trimmed ? '***' : '';
+  return `${trimmed.slice(0, 3)}******${trimmed.slice(-4)}`;
 }
 
 export function getVoiceAgentStatus() {
@@ -122,12 +160,22 @@ export function getVoiceAgentStatus() {
     webhookReady: webhookReadiness.ready,
     missingWebhookFields: webhookReadiness.missingFields,
     webhookHttps: webhookReadiness.isHttps,
+    mockSimulationAllowed: isMockSimulationAllowed(),
     agentVersion: env.SARVAM_AGENT_VERSION,
+    callerIdMasked: env.SARVAM_PHONE_NUMBER ? maskPhoneNumber(env.SARVAM_PHONE_NUMBER) : null,
     providers: {
       mock: mockProvider.getStatus(),
       sarvam: sarvamProvider.getStatus(),
     },
   };
+}
+
+export async function verifySarvamAgentDeployment(): Promise<SarvamDeploymentVerificationResult> {
+  return sarvamProvider.verifyAgentDeployment();
+}
+
+export async function fetchSarvamRecordingAudio(interactionId: string) {
+  return sarvamProvider.fetchInteractionRecording(interactionId);
 }
 
 export async function dispatchLiveVoiceCall(context: VoiceCallContextPayload) {
@@ -197,17 +245,21 @@ export function mapSarvamTranscript(
 
 /**
  * Interprets official Sarvam outbound webhook status + final_agent_variables.
- * Strict medical safety rules:
- * - Only `connected` calls may inspect patient intake variables.
- * - `no_answer`, `busy`, and `failed` ALWAYS stay UNCONFIRMED.
+ * Strict medical & privacy safety rules:
+ * - Only terminal `connected`/`completed` calls may inspect patient intake variables.
+ * - `no_answer`, `busy`, `rejected`, `cancelled`, and `failed` ALWAYS stay UNCONFIRMED.
  * - Meal confirmation (`meal_finished`) NEVER implies medicine intake.
  * - Medicine intake is marked `TAKEN` ONLY when explicit confirmation variables support it.
+ * - Verbatim transcript turns are stored/exposed ONLY when recording/transcription consent is GRANTED.
  */
 export function evaluateSarvamAgentOutcome(
   payload: SarvamOutboundWebhookPayload,
   patientName: string,
-  medicineName: string
+  medicineName: string,
+  options: { recordingConsentGranted?: boolean } = {}
 ): {
+  isIntermediateEvent: boolean;
+  callStatus: CallLifecycleStatus;
   outcome: CallOutcome;
   durationSeconds: number;
   mealConfirmed: boolean | null;
@@ -219,13 +271,38 @@ export function evaluateSarvamAgentOutcome(
   aiSummary: string;
   safetyFlags: string[];
 } {
+  const recordingConsentGranted = options.recordingConsentGranted ?? true;
   const durationSeconds =
     typeof payload.duration === 'number' && Number.isFinite(payload.duration) && payload.duration > 0
       ? Math.round(payload.duration)
       : 0;
 
+  if (
+    payload.status === 'queued' ||
+    payload.status === 'initiating' ||
+    payload.status === 'ringing' ||
+    payload.status === 'in_progress'
+  ) {
+    const lifecycle = mapProviderRawStatusToLifecycle(payload.status);
+    return {
+      isIntermediateEvent: true,
+      callStatus: lifecycle,
+      outcome: 'PENDING',
+      durationSeconds,
+      mealConfirmed: null,
+      medicineConfirmed: 'UNCONFIRMED',
+      feelingUnwell: false,
+      requestedHelp: false,
+      turns: [],
+      aiSummary: `Sarvam outbound call to ${patientName} is currently ${lifecycle}. Awaiting completion.`,
+      safetyFlags: [`SARVAM_${lifecycle}`],
+    };
+  }
+
   if (payload.status === 'no_answer') {
     return {
+      isIntermediateEvent: false,
+      callStatus: 'NO_ANSWER',
       outcome: 'NO_ANSWER',
       durationSeconds,
       mealConfirmed: null,
@@ -240,6 +317,8 @@ export function evaluateSarvamAgentOutcome(
 
   if (payload.status === 'busy') {
     return {
+      isIntermediateEvent: false,
+      callStatus: 'BUSY',
       outcome: 'BUSY',
       durationSeconds,
       mealConfirmed: null,
@@ -252,9 +331,43 @@ export function evaluateSarvamAgentOutcome(
     };
   }
 
+  if (payload.status === 'rejected') {
+    return {
+      isIntermediateEvent: false,
+      callStatus: 'REJECTED',
+      outcome: 'REJECTED',
+      durationSeconds,
+      mealConfirmed: null,
+      medicineConfirmed: 'UNCONFIRMED',
+      feelingUnwell: false,
+      requestedHelp: false,
+      turns: [],
+      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} was rejected. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['SARVAM_REJECTED', 'DOSE_UNCONFIRMED'],
+    };
+  }
+
+  if (payload.status === 'cancelled' || payload.status === 'canceled') {
+    return {
+      isIntermediateEvent: false,
+      callStatus: 'CANCELLED',
+      outcome: 'CANCELLED',
+      durationSeconds,
+      mealConfirmed: null,
+      medicineConfirmed: 'UNCONFIRMED',
+      feelingUnwell: false,
+      requestedHelp: false,
+      turns: [],
+      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} was cancelled before completion. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['SARVAM_CANCELLED', 'DOSE_UNCONFIRMED'],
+    };
+  }
+
   if (payload.status === 'failed') {
     const reasonText = payload.failure_reason ? ` (${payload.failure_reason})` : '';
     return {
+      isIntermediateEvent: false,
+      callStatus: 'FAILED',
       outcome: 'FAILED',
       durationSeconds,
       mealConfirmed: null,
@@ -267,9 +380,11 @@ export function evaluateSarvamAgentOutcome(
     };
   }
 
-  // status === 'connected'
+  // status === 'connected' | 'completed'
   const vars = payload.final_agent_variables ?? null;
-  const turns = mapSarvamTranscript(payload.interaction_transcript);
+  const turns = recordingConsentGranted
+    ? mapSarvamTranscript(payload.interaction_transcript)
+    : [];
 
   const feelingUnwell =
     vars !== null &&
@@ -324,6 +439,10 @@ export function evaluateSarvamAgentOutcome(
   let outcome: CallOutcome;
   const safetyFlags: string[] = [];
 
+  if (!recordingConsentGranted) {
+    safetyFlags.push('RECORDING_AND_TRANSCRIPT_WITHHELD_NO_CONSENT');
+  }
+
   if (feelingUnwell || requestedHelp) {
     outcome = 'ESCALATED';
     safetyFlags.push(feelingUnwell ? 'PATIENT_FEELING_UNWELL' : 'PATIENT_REQUESTED_HELP');
@@ -345,23 +464,25 @@ export function evaluateSarvamAgentOutcome(
   }
 
   const summaryVar =
-    vars && typeof vars.summary === 'string' && vars.summary.trim()
+    recordingConsentGranted && vars && typeof vars.summary === 'string' && vars.summary.trim()
       ? vars.summary.trim()
       : undefined;
 
   const aiSummary =
     summaryVar ||
     (medicineConfirmed === 'TAKEN'
-      ? `Sarvam call connected (${durationSeconds}s): ${patientName} explicitly confirmed taking ${medicineName}.`
+      ? `Sarvam call completed (${durationSeconds}s): ${patientName} explicitly confirmed taking ${medicineName}.`
       : medicineConfirmed === 'NOT_TAKEN'
-        ? `Sarvam call connected (${durationSeconds}s): ${patientName} reported NOT taking ${medicineName}.`
+        ? `Sarvam call completed (${durationSeconds}s): ${patientName} reported NOT taking ${medicineName}.`
         : outcome === 'CALLBACK_REQUESTED'
-          ? `Sarvam call connected (${durationSeconds}s): ${patientName} requested a callback in ${requestedCallbackDelayMinutes} minutes. Dose stays UNCONFIRMED.`
+          ? `Sarvam call completed (${durationSeconds}s): ${patientName} requested a callback in ${requestedCallbackDelayMinutes} minutes. Dose stays UNCONFIRMED.`
           : outcome === 'ESCALATED'
             ? `Sarvam call escalated (${durationSeconds}s): ${patientName} reported feeling unwell or asked for caregiver help.`
-            : `Sarvam call connected (${durationSeconds}s) for ${patientName} regarding ${medicineName}, but explicit medicine intake was not confirmed. Dose remains UNCONFIRMED.`);
+            : `Sarvam call completed (${durationSeconds}s) for ${patientName} regarding ${medicineName}, but explicit medicine intake was not confirmed. Dose remains UNCONFIRMED.`);
 
   return {
+    isIntermediateEvent: false,
+    callStatus: 'COMPLETED',
     outcome,
     durationSeconds,
     mealConfirmed,
