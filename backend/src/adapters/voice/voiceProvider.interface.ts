@@ -23,14 +23,17 @@ export interface VoiceCallContextPayload {
   patientName: string;
   phoneNumber: string;
   languageCode: string;
+  languageName?: string;
   languageBcp47: string;
   voiceGender: 'FEMALE' | 'MALE' | 'NEUTRAL';
   recordingConsentGranted: boolean;
+  transcriptConsentGranted?: boolean;
   medicineId: string;
   medicineName: string;
   dosage: string;
   foodInstruction: string;
   associatedMeal: string;
+  slotLabel?: string;
   prescribedInstructions: string;
   doseInstanceId: string;
   callType: CallType;
@@ -44,6 +47,9 @@ export interface SimulatedTurn {
   speaker: 'AI' | 'PATIENT';
   text: string;
   translatedText?: string;
+  timestamp?: Date;
+  language?: string;
+  turnId?: string | number;
   intent?: string;
 }
 
@@ -55,11 +61,15 @@ export interface VoiceCallExecutionResult {
   attemptId?: string;
   interactionId?: string;
   sarvamStatus?: SarvamCallConnectivityStatus;
+  providerStatusRaw?: string;
   failureReason?: string;
   channelInfo?: Record<string, unknown>;
   finalAgentVariables?: Record<string, unknown>;
   recordingUrl?: string;
   transcriptConsentGranted?: boolean;
+  audioRecordingConsentGranted?: boolean;
+  transcriptSource?: 'WEBHOOK' | 'ANALYTICS_API' | 'MOCK' | 'NONE';
+  actualLanguageUsed?: string;
   outcome: CallOutcome;
   durationSeconds: number;
   mealConfirmed: boolean | null;

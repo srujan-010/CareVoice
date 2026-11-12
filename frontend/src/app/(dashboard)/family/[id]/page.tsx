@@ -24,7 +24,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { apiRequest } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { DOSE_STATUS_META, getLanguageLabel } from '@/lib/constants';
+import { CONSENT_TYPE_META, DOSE_STATUS_META, getLanguageLabel } from '@/lib/constants';
 import { formatDateTimeInTz } from '@/lib/utils';
 import type { ConsentStatus, ConsentType, FamilyMember } from '@/types';
 
@@ -345,45 +345,67 @@ export default function FamilyMemberProfilePage() {
         <TabsContent value="consents">
           <Card>
             <CardHeader>
-              <CardTitle>Consent Management</CardTitle>
+              <CardTitle>Consent Management & Retention Policy</CardTitle>
               <CardDescription>
-                Control automated calling, recording, WhatsApp, and SMS permissions
+                Voice Calling, Transcript Storage, and Audio Recording consents are strictly
+                independent. Revoking a consent immediately enforces data retention rules.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(member.consents || []).map((consent) => (
-                <div
-                  key={consent._id}
-                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-sky-100 bg-sky-50/40 p-4"
-                >
-                  <div>
-                    <p className="text-sm font-bold text-slate-900">
-                      {consent.consentType.replace(/_/g, ' ')}
-                    </p>
-                    <p className="text-xs text-slate-500">
-                      Updated via {consent.method} • {formatDateTimeInTz(consent.updatedAt, member.timezone)}
-                    </p>
+              {(member.consents || []).map((consent) => {
+                const meta = CONSENT_TYPE_META[consent.consentType];
+                return (
+                  <div
+                    key={consent._id}
+                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-sky-100 bg-sky-50/40 p-4"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-bold text-slate-900">
+                          {meta?.title || consent.consentType.replace(/_/g, ' ')}
+                        </p>
+                        {consent.consentVersion ? (
+                          <Badge variant="neutral">{consent.consentVersion}</Badge>
+                        ) : null}
+                      </div>
+                      {meta?.description ? (
+                        <p className="text-xs text-slate-600">{meta.description}</p>
+                      ) : null}
+                      <p className="text-[11px] text-slate-500">
+                        Updated via {consent.method} •{' '}
+                        {formatDateTimeInTz(consent.updatedAt, member.timezone)}
+                        {consent.grantedAt
+                          ? ` • Granted: ${formatDateTimeInTz(consent.grantedAt, member.timezone)}`
+                          : ''}
+                        {consent.revokedAt
+                          ? ` • Revoked: ${formatDateTimeInTz(consent.revokedAt, member.timezone)}`
+                          : ''}
+                      </p>
+                      {meta?.retentionNote ? (
+                        <p className="text-[11px] text-amber-800">{meta.retentionNote}</p>
+                      ) : null}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <SelectNative
+                        disabled={!canEdit}
+                        value={consent.status}
+                        onChange={(e) =>
+                          handleConsentUpdate(
+                            consent.consentType,
+                            e.target.value as ConsentStatus
+                          )
+                        }
+                        className="w-40"
+                      >
+                        <option value="GRANTED">Granted</option>
+                        <option value="PENDING">Pending</option>
+                        <option value="DENIED">Denied</option>
+                        <option value="REVOKED">Revoked</option>
+                      </SelectNative>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <SelectNative
-                      disabled={!canEdit}
-                      value={consent.status}
-                      onChange={(e) =>
-                        handleConsentUpdate(
-                          consent.consentType,
-                          e.target.value as ConsentStatus
-                        )
-                      }
-                      className="w-40"
-                    >
-                      <option value="GRANTED">Granted</option>
-                      <option value="PENDING">Pending</option>
-                      <option value="DENIED">Denied</option>
-                      <option value="REVOKED">Revoked</option>
-                    </SelectNative>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </CardContent>
           </Card>
         </TabsContent>

@@ -87,7 +87,8 @@ export async function updateConsent(req: Request, res: Response, next: NextFunct
       String(req.params.id),
       req.auth.userId,
       req.auth.name,
-      req.body
+      req.body,
+      req.ip
     );
     res.json({ success: true, data: consent });
   } catch (err) {

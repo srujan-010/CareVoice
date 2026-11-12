@@ -150,6 +150,7 @@ describe('Sarvam Instant Outbound & Webhook End-to-End Integration Tests (Mocked
           relationship: 'Son',
         },
         recordingConsentStatus: 'GRANTED',
+        transcriptConsentStatus: 'GRANTED',
         voiceCallingConsentStatus: 'GRANTED',
       });
     expect(memberRes.status).toBe(201);
@@ -235,6 +236,9 @@ describe('Sarvam Instant Outbound & Webhook End-to-End Integration Tests (Mocked
       connection_id: '50141c04-3e-a97582cf-bbd0',
       agent_phone_number: '+917965860596',
     });
+    expect(reqPayload.app_config.app_overrides?.initial_language_name).toBe('Telugu');
+    expect(reqPayload.app_config.app_overrides?.initial_bot_message).toContain('నమస్కారం');
+    expect(reqPayload.app_config.agent_variables?.language_code).toBe('te');
     expect(reqPayload.user_config.user_phone_number).toBe('+919876500010');
     expect(reqPayload.webhook_config.url).toBe(
       `https://carevoice-test.example/api/voice-agent/webhook/sarvam/${TEST_WEBHOOK_TOKEN}`

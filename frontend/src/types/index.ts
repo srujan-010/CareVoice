@@ -1,7 +1,21 @@
 export type UserRole = 'ADMIN' | 'CAREGIVER' | 'VIEWER';
 
 export type ConsentStatus = 'GRANTED' | 'DENIED' | 'REVOKED' | 'PENDING';
-export type ConsentType = 'VOICE_CALLING' | 'CALL_RECORDING' | 'WHATSAPP_ALERTS' | 'SMS_ALERTS';
+export type ConsentType =
+  | 'VOICE_CALLING'
+  | 'CALL_TRANSCRIPT'
+  | 'CALL_RECORDING'
+  | 'WHATSAPP_ALERTS'
+  | 'SMS_ALERTS';
+
+export type LanguageStatus =
+  | 'MATCHED'
+  | 'LANGUAGE_UNAVAILABLE'
+  | 'LANGUAGE_FALLBACK_REQUIRED'
+  | 'FALLBACK_AUTHORIZED'
+  | 'LANGUAGE_MISMATCH';
+
+export type TranscriptStatus = 'PENDING' | 'AVAILABLE' | 'UNAVAILABLE' | 'CONSENT_DENIED';
 
 export type DoseStatus =
   | 'PATIENT_REPORTED_TAKEN'
@@ -37,13 +51,17 @@ export type CallLifecycleStatus =
   | 'QUEUED'
   | 'INITIATING'
   | 'RINGING'
+  | 'ANSWERED'
   | 'IN_PROGRESS'
   | 'COMPLETED'
   | 'FAILED'
   | 'NO_ANSWER'
   | 'BUSY'
   | 'REJECTED'
-  | 'CANCELLED';
+  | 'NOT_CONNECTED'
+  | 'CANCELLED'
+  | 'LANGUAGE_UNAVAILABLE'
+  | 'LANGUAGE_FALLBACK_REQUIRED';
 
 export type CallOutcome =
   | 'PENDING'
@@ -52,10 +70,55 @@ export type CallOutcome =
   | 'BUSY'
   | 'REJECTED'
   | 'FAILED'
+  | 'NOT_CONNECTED'
   | 'COMPLETED'
   | 'CALLBACK_REQUESTED'
   | 'ESCALATED'
   | 'CANCELLED';
+
+export type SarvamDiscoverySource =
+  | 'deployment'
+  | 'campaign'
+  | 'experiment'
+  | 'test_suite'
+  | 'analytics';
+
+export interface SarvamDiscoveredAppSummary {
+  appId: string;
+  matchesConfiguredAppId: boolean;
+  sources: SarvamDiscoverySource[];
+  versions: number[];
+  statuses: string[];
+  deploymentIds: string[];
+  campaignIds: string[];
+  connectionIds: string[];
+  phoneNumbersMasked: string[];
+  matchesVersion?: boolean;
+  matchesConnectionId?: boolean;
+  matchesPhoneNumber?: boolean;
+}
+
+export interface SarvamDiscoveredConnectionSummary {
+  connectionId: string;
+  matchesConfiguredConnectionId: boolean;
+  phoneNumbersMasked: string[];
+  matchesConfiguredPhone: boolean;
+  source: 'deployment' | 'campaign';
+}
+
+export interface SarvamWorkspaceDiscoverySummary {
+  orgId: string;
+  workspaceId: string;
+  configuredAgentId: string;
+  configuredAgentVersion: number;
+  configuredConnectionId: string;
+  configuredPhoneMasked: string;
+  analyticsAppCheckStatus?: number;
+  analyticsAppCheckDetail?: string;
+  endpointsChecked: string[];
+  discoveredApps: SarvamDiscoveredAppSummary[];
+  discoveredConnections: SarvamDiscoveredConnectionSummary[];
+}
 
 export interface VoiceCallPreflight {
   activeProvider: 'mock' | 'sarvam';
@@ -72,13 +135,39 @@ export interface VoiceCallPreflight {
   callerIdMasked: string | null;
   deploymentCheck?: {
     verified: boolean;
-    status: 'active' | 'inactive' | 'mismatch' | 'unlisted' | 'error';
+    status:
+      | 'active'
+      | 'verified_campaign'
+      | 'inactive'
+      | 'mismatch'
+      | 'not_found'
+      | 'unverified'
+      | 'error';
+    authCategory?:
+      | 'VERIFIED'
+      | 'CONFIG_MISSING'
+      | 'KEY_SYNTAX_ERROR'
+      | 'INVALID_API_KEY_FORMAT'
+      | 'UNAUTHORIZED_INVALID_OR_REVOKED_KEY'
+      | 'INSUFFICIENT_PERMISSIONS'
+      | 'WORKSPACE_OR_ORG_NOT_FOUND'
+      | 'APP_NOT_FOUND_IN_WORKSPACE'
+      | 'AGENT_UNVERIFIED_IN_WORKSPACE'
+      | 'DEPLOYMENT_INACTIVE'
+      | 'DEPLOYMENT_MISMATCH'
+      | 'NETWORK_ERROR'
+      | 'UPSTREAM_ERROR';
     matchedDeploymentId?: string;
     matchedAppVersion?: number;
     connectionVerified: boolean;
     phoneVerified: boolean;
     message: string;
     upstreamStatus?: number;
+    upstreamDetail?: string;
+    diagnosticHint?: string;
+    authHeader?: 'X-API-Key';
+    credentialsSharedWithOutbound?: boolean;
+    workspaceDiscovery?: SarvamWorkspaceDiscoverySummary;
   } | null;
 }
 
@@ -147,6 +236,7 @@ export interface FamilyMember {
     preferredVoiceGender: 'FEMALE' | 'MALE' | 'NEUTRAL';
   };
   recordingConsentStatus: ConsentStatus;
+  transcriptConsentStatus?: ConsentStatus;
   voiceCallingConsentStatus: ConsentStatus;
   isActive: boolean;
   notes?: string;
@@ -156,6 +246,9 @@ export interface FamilyMember {
     consentType: ConsentType;
     status: ConsentStatus;
     method: string;
+    consentVersion?: string;
+    grantedAt?: string;
+    revokedAt?: string;
     updatedAt: string;
   }>;
   createdAt: string;
@@ -223,6 +316,7 @@ export interface DashboardOverviewData {
       timezone: string;
       isActive: boolean;
       recordingConsentStatus: ConsentStatus;
+      transcriptConsentStatus?: ConsentStatus;
       voiceCallingConsentStatus: ConsentStatus;
     }>;
     pendingEscalations: Array<Record<string, unknown>>;

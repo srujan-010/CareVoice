@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { LANGUAGE_CODES } from '../constants/languages';
-import { CONSENT_STATUSES, CONSENT_TYPES } from '../constants/statuses';
+import { CONSENT_STATUSES, CONSENT_TYPES, normalizeConsentTypeInput } from '../constants/statuses';
 import * as familyMemberController from '../controllers/familyMember.controller';
 import { authenticate, authorizeRoles } from '../middleware/auth.middleware';
 import { validateBody } from '../middleware/validate.middleware';
@@ -54,6 +54,7 @@ const createMemberSchema = z.object({
   emergencyContact: emergencyContactSchema,
   callingPreferences: callingPreferencesSchema.optional(),
   recordingConsentStatus: z.enum(CONSENT_STATUSES).optional(),
+  transcriptConsentStatus: z.enum(CONSENT_STATUSES).optional(),
   voiceCallingConsentStatus: z.enum(CONSENT_STATUSES).optional(),
   isActive: z.boolean().optional(),
   notes: z.string().max(1000).optional(),
@@ -62,9 +63,22 @@ const createMemberSchema = z.object({
 const updateMemberSchema = createMemberSchema.partial();
 
 const consentSchema = z.object({
-  consentType: z.enum(CONSENT_TYPES),
+  consentType: z
+    .string()
+    .transform((val, ctx) => {
+      const normalized = normalizeConsentTypeInput(val);
+      if (!normalized || !CONSENT_TYPES.includes(normalized)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Unsupported consentType. Accepted values: ${CONSENT_TYPES.join(', ')}`,
+        });
+        return z.NEVER;
+      }
+      return normalized;
+    }),
   status: z.enum(CONSENT_STATUSES),
   method: z.enum(['DASHBOARD', 'VERBAL_CALL', 'WRITTEN']).optional(),
+  consentVersion: z.string().max(32).optional(),
   notes: z.string().max(500).optional(),
 });
 

@@ -17,31 +17,60 @@ import {
 
 const router = Router();
 
+const SARVAM_WEBHOOK_ACCEPTED_STATUSES = [
+  'queued',
+  'initiating',
+  'initiated',
+  'dialing',
+  'ringing',
+  'ring',
+  'answered',
+  'in_progress',
+  'ongoing',
+  'connected',
+  'completed',
+  'succeeded',
+  'no_answer',
+  'no-answer',
+  'unanswered',
+  'busy',
+  'failed',
+  'error',
+  'rejected',
+  'declined',
+  'not_connected',
+  'not-connected',
+  'unreachable',
+  'cancelled',
+  'canceled',
+] as const;
+
+const normalizedSarvamStatusSchema = z
+  .string()
+  .transform((v) => v.trim().toLowerCase())
+  .refine(
+    (v): v is (typeof SARVAM_WEBHOOK_ACCEPTED_STATUSES)[number] =>
+      (SARVAM_WEBHOOK_ACCEPTED_STATUSES as readonly string[]).includes(v),
+    { message: 'Unsupported Sarvam webhook status value' }
+  );
+
 const sarvamWebhookSchema = z
   .object({
     attempt_id: z.string().min(1),
-    status: z.enum([
-      'queued',
-      'initiating',
-      'ringing',
-      'in_progress',
-      'connected',
-      'completed',
-      'no_answer',
-      'busy',
-      'failed',
-      'rejected',
-      'cancelled',
-      'canceled',
-    ]),
+    status: normalizedSarvamStatusSchema.optional(),
+    connectivity_status: normalizedSarvamStatusSchema.optional(),
+    event_type: z.string().nullable().optional(),
     event_id: z.string().nullable().optional(),
     started_at: z.string().nullable().optional(),
+    answered_at: z.string().nullable().optional(),
     ended_at: z.string().nullable().optional(),
+    ended_by: z.string().nullable().optional(),
     recording_url: z.string().url().nullable().optional(),
     channel_info: z.record(z.unknown()).nullable().optional(),
     duration: z.number().min(0).nullable().optional(),
     interaction_id: z.string().nullable().optional(),
     failure_reason: z.string().nullable().optional(),
+    language_name: z.string().nullable().optional(),
     final_agent_variables: z.record(z.unknown()).nullable().optional(),
     webhook_config: z
       .object({
@@ -52,7 +81,10 @@ const sarvamWebhookSchema = z
       .optional(),
     interaction_transcript: z.array(z.record(z.unknown())).nullable().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .refine((data) => Boolean(data.status || data.connectivity_status), {
+    message: 'Sarvam webhook payload must include status or connectivity_status',
+  });
 
 const doseScheduleContextSchema = z.object({
   familyMemberId: z.string().min(1),

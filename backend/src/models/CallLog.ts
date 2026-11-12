@@ -6,31 +6,50 @@ import {
   CallLifecycleStatus,
   CallOutcome,
   CallType,
+  LANGUAGE_STATUSES,
+  LanguageStatus,
   MEDICINE_CONFIRMATION_VALUES,
   MedicineConfirmationValue,
   RECORDING_STATUSES,
   RecordingStatus,
+  TRANSCRIPT_STATUSES,
+  TranscriptStatus,
 } from '../constants/statuses';
 
 export type SarvamCallConnectivityStatus =
   | 'queued'
   | 'initiating'
+  | 'dialing'
   | 'ringing'
+  | 'answered'
   | 'in_progress'
   | 'connected'
   | 'completed'
   | 'no_answer'
+  | 'unanswered'
   | 'busy'
   | 'failed'
   | 'rejected'
+  | 'not_connected'
   | 'cancelled'
-  | 'canceled';
+  | 'canceled'
+  | 'unknown'
+  | (string & {});
 
 export interface ICallLifecycleEvent {
   status: CallLifecycleStatus;
   timestamp: Date;
-  source: 'SYSTEM' | 'PROVIDER_API' | 'WEBHOOK' | 'ADMIN';
+  source: 'SYSTEM' | 'PROVIDER_API' | 'WEBHOOK' | 'RECONCILIATION' | 'ADMIN';
   note?: string;
+}
+
+export interface ICallWebhookEventRecord {
+  eventId: string;
+  receivedAt: Date;
+  source: 'WEBHOOK' | 'ANALYTICS_API';
+  rawStatus: string;
+  mappedStatus: CallLifecycleStatus;
+  sanitizedPayload: Record<string, unknown>;
 }
 
 export interface ICallLog extends Document {
@@ -46,21 +65,28 @@ export interface ICallLog extends Document {
   attemptId?: string;
   interactionId?: string;
   sarvamStatus?: SarvamCallConnectivityStatus;
+  providerStatusRaw?: string;
   failureReason?: string;
   channelInfo?: Record<string, unknown>;
   finalAgentVariables?: Record<string, unknown>;
   providerResponseMeta?: Record<string, unknown>;
   contextSnapshot?: Record<string, unknown>;
   processedWebhookIds: string[];
+  webhookEvents: ICallWebhookEventRecord[];
   lastWebhookAt?: Date;
+  lastStatusUpdateAt?: Date;
+  lastReconciledAt?: Date;
+  providerUpdatedAt?: Date;
   mode: 'mock' | 'live';
   isMock: boolean;
   isTestCall: boolean;
   callPurpose?: string;
   callStatus: CallLifecycleStatus;
   statusHistory: ICallLifecycleEvent[];
-  recordingConsentGranted: boolean;
+  voiceCallingConsentGranted: boolean;
   transcriptConsentGranted: boolean;
+  audioRecordingConsentGranted: boolean;
+  recordingConsentGranted: boolean;
   queuedAt?: Date;
   initiatingAt?: Date;
   ringingAt?: Date;
@@ -68,12 +94,20 @@ export interface ICallLog extends Document {
   callType: CallType;
   phoneNumber: string;
   language: string;
+  requestedLanguage?: string;
+  actualLanguageUsed?: string;
+  fallbackLanguage?: string;
+  languageStatus: LanguageStatus;
+  fallbackAuthorizedByUserId?: Types.ObjectId;
   scheduledAt: Date;
   startedAt?: Date;
   endedAt?: Date;
   durationSeconds: number;
   outcome: CallOutcome;
   recordingStatus: RecordingStatus;
+  recordingNote?: string;
+  transcriptStatus: TranscriptStatus;
+  transcriptSource?: 'WEBHOOK' | 'ANALYTICS_API' | 'MOCK' | 'NONE';
   transcriptAvailable: boolean;
   mealConfirmed: boolean | null;
   medicineConfirmed: MedicineConfirmationValue;
@@ -88,10 +122,22 @@ const lifecycleEventSchema = new Schema<ICallLifecycleEvent>(
     timestamp: { type: Date, required: true, default: Date.now },
     source: {
       type: String,
-      enum: ['SYSTEM', 'PROVIDER_API', 'WEBHOOK', 'ADMIN'],
+      enum: ['SYSTEM', 'PROVIDER_API', 'WEBHOOK', 'RECONCILIATION', 'ADMIN'],
       required: true,
     },
     note: { type: String, trim: true, maxlength: 500 },
+  },
+  { _id: false }
+);
+
+const webhookEventSchema = new Schema<ICallWebhookEventRecord>(
+  {
+    eventId: { type: String, required: true, trim: true },
+    receivedAt: { type: Date, required: true, default: Date.now },
+    source: { type: String, enum: ['WEBHOOK', 'ANALYTICS_API'], required: true },
+    rawStatus: { type: String, required: true, trim: true },
+    mappedStatus: { type: String, enum: CALL_LIFECYCLE_STATUSES, required: true },
+    sanitizedPayload: { type: Schema.Types.Mixed, default: {} },
   },
   { _id: false }
 );
@@ -114,30 +160,19 @@ const callLogSchema = new Schema<ICallLog>(
     providerCallId: { type: String, trim: true, index: true },
     attemptId: { type: String, trim: true },
     interactionId: { type: String, trim: true, index: true },
-    sarvamStatus: {
-      type: String,
-      enum: [
-        'queued',
-        'initiating',
-        'ringing',
-        'in_progress',
-        'connected',
-        'completed',
-        'no_answer',
-        'busy',
-        'failed',
-        'rejected',
-        'cancelled',
-        'canceled',
-      ],
-    },
+    sarvamStatus: { type: String, trim: true, lowercase: true },
+    providerStatusRaw: { type: String, trim: true },
     failureReason: { type: String, trim: true, maxlength: 1000 },
     channelInfo: { type: Schema.Types.Mixed },
     finalAgentVariables: { type: Schema.Types.Mixed },
     providerResponseMeta: { type: Schema.Types.Mixed },
     contextSnapshot: { type: Schema.Types.Mixed },
     processedWebhookIds: { type: [String], default: [] },
+    webhookEvents: { type: [webhookEventSchema], default: [] },
     lastWebhookAt: { type: Date },
+    lastStatusUpdateAt: { type: Date },
+    lastReconciledAt: { type: Date },
+    providerUpdatedAt: { type: Date },
     mode: { type: String, enum: ['mock', 'live'], required: true, default: 'mock' },
     isMock: { type: Boolean, required: true, default: true },
     isTestCall: { type: Boolean, required: true, default: false },
@@ -150,8 +185,10 @@ const callLogSchema = new Schema<ICallLog>(
       index: true,
     },
     statusHistory: { type: [lifecycleEventSchema], default: [] },
-    recordingConsentGranted: { type: Boolean, required: true, default: false },
+    voiceCallingConsentGranted: { type: Boolean, required: true, default: true },
     transcriptConsentGranted: { type: Boolean, required: true, default: false },
+    audioRecordingConsentGranted: { type: Boolean, required: true, default: false },
+    recordingConsentGranted: { type: Boolean, required: true, default: false },
     queuedAt: { type: Date },
     initiatingAt: { type: Date },
     ringingAt: { type: Date },
@@ -159,6 +196,16 @@ const callLogSchema = new Schema<ICallLog>(
     callType: { type: String, enum: CALL_TYPES, required: true },
     phoneNumber: { type: String, required: true, trim: true },
     language: { type: String, required: true },
+    requestedLanguage: { type: String, trim: true },
+    actualLanguageUsed: { type: String, trim: true },
+    fallbackLanguage: { type: String, trim: true },
+    languageStatus: {
+      type: String,
+      enum: LANGUAGE_STATUSES,
+      default: 'MATCHED',
+      required: true,
+    },
+    fallbackAuthorizedByUserId: { type: Schema.Types.ObjectId, ref: 'User' },
     scheduledAt: { type: Date, required: true },
     startedAt: { type: Date },
     endedAt: { type: Date },
@@ -169,6 +216,18 @@ const callLogSchema = new Schema<ICallLog>(
       enum: RECORDING_STATUSES,
       default: 'UNAVAILABLE',
       required: true,
+    },
+    recordingNote: { type: String, trim: true, maxlength: 500 },
+    transcriptStatus: {
+      type: String,
+      enum: TRANSCRIPT_STATUSES,
+      default: 'PENDING',
+      required: true,
+    },
+    transcriptSource: {
+      type: String,
+      enum: ['WEBHOOK', 'ANALYTICS_API', 'MOCK', 'NONE'],
+      default: 'NONE',
     },
     transcriptAvailable: { type: Boolean, default: false },
     mealConfirmed: { type: Boolean, default: null },

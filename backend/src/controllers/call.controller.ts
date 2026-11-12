@@ -35,7 +35,10 @@ export async function listCalls(req: Request, res: Response, next: NextFunction)
 export async function getCallDetail(req: Request, res: Response, next: NextFunction) {
   try {
     if (!req.auth) throw new UnauthorizedError();
-    const detail = await callService.getCallDetail(req.auth.familyId, String(req.params.id));
+    const reconcile = req.query.reconcile === 'true';
+    const detail = await callService.getCallDetail(req.auth.familyId, String(req.params.id), {
+      reconcile,
+    });
     res.json({ success: true, data: detail });
   } catch (err) {
     next(err);

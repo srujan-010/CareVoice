@@ -113,6 +113,7 @@ export async function resolveValidatedDoseContext(input: ResolveDoseContextInput
       languageBcp47: langMeta.bcp47,
       timezone: member.timezone,
       recordingConsentStatus: member.recordingConsentStatus,
+      transcriptConsentStatus: member.transcriptConsentStatus ?? 'PENDING',
       voiceCallingConsentStatus: member.voiceCallingConsentStatus,
       voiceGender: member.callingPreferences?.preferredVoiceGender ?? 'FEMALE',
     },

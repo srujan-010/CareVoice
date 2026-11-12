@@ -55,6 +55,7 @@ export function FamilyMemberDialog({
   );
 
   const [recordingConsentStatus, setRecordingConsentStatus] = useState<ConsentStatus>('PENDING');
+  const [transcriptConsentStatus, setTranscriptConsentStatus] = useState<ConsentStatus>('PENDING');
   const [voiceCallingConsentStatus, setVoiceCallingConsentStatus] =
     useState<ConsentStatus>('GRANTED');
   const [isActive, setIsActive] = useState(true);
@@ -80,6 +81,7 @@ export function FamilyMemberDialog({
       setAllowConfirmationCalls(member.callingPreferences?.allowConfirmationCalls ?? true);
       setPreferredVoiceGender(member.callingPreferences?.preferredVoiceGender ?? 'FEMALE');
       setRecordingConsentStatus(member.recordingConsentStatus);
+      setTranscriptConsentStatus(member.transcriptConsentStatus ?? 'PENDING');
       setVoiceCallingConsentStatus(member.voiceCallingConsentStatus);
       setIsActive(member.isActive);
       setNotes(member.notes || '');
@@ -102,6 +104,7 @@ export function FamilyMemberDialog({
       setAllowConfirmationCalls(true);
       setPreferredVoiceGender('FEMALE');
       setRecordingConsentStatus('PENDING');
+      setTranscriptConsentStatus('PENDING');
       setVoiceCallingConsentStatus('GRANTED');
       setIsActive(true);
       setNotes('');
@@ -137,6 +140,7 @@ export function FamilyMemberDialog({
         preferredVoiceGender,
       },
       recordingConsentStatus,
+      transcriptConsentStatus,
       voiceCallingConsentStatus,
       isActive,
       notes: notes.trim() || undefined,
@@ -246,10 +250,17 @@ export function FamilyMemberDialog({
                 >
                   {SUPPORTED_LANGUAGES.map((lang) => (
                     <option key={lang.code} value={lang.code}>
-                      {lang.name} ({lang.nativeName})
+                      {lang.name} ({lang.nativeName}){!lang.sarvamSupported ? ' — Fallback Required on Sarvam' : ''}
                     </option>
                   ))}
                 </SelectNative>
+                {SUPPORTED_LANGUAGES.find((l) => l.code === preferredLanguage)?.sarvamSupported ===
+                false ? (
+                  <p className="mt-1 text-[11px] text-amber-700">
+                    Sarvam live calling does not support this language natively; explicit Admin
+                    fallback authorization will be required before dialing (never auto-switches to Hindi).
+                  </p>
+                ) : null}
               </div>
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">
@@ -360,10 +371,10 @@ export function FamilyMemberDialog({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">
-                  Voice Calling Consent
+                  Automated AI Calls
                 </label>
                 <SelectNative
                   value={voiceCallingConsentStatus}
@@ -377,7 +388,21 @@ export function FamilyMemberDialog({
               </div>
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">
-                  Recording Consent
+                  Transcript Storage
+                </label>
+                <SelectNative
+                  value={transcriptConsentStatus}
+                  onChange={(e) => setTranscriptConsentStatus(e.target.value as ConsentStatus)}
+                >
+                  <option value="PENDING">Pending</option>
+                  <option value="GRANTED">Granted</option>
+                  <option value="DENIED">Denied</option>
+                  <option value="REVOKED">Revoked</option>
+                </SelectNative>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-700">
+                  Audio Recording
                 </label>
                 <SelectNative
                   value={recordingConsentStatus}
@@ -391,7 +416,7 @@ export function FamilyMemberDialog({
               </div>
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">
-                  Voice Tone Preference
+                  Voice Tone
                 </label>
                 <SelectNative
                   value={preferredVoiceGender}
@@ -405,6 +430,22 @@ export function FamilyMemberDialog({
                 </SelectNative>
               </div>
             </div>
+
+            <p className="rounded-lg border border-sky-100 bg-white px-3 py-2 text-[11px] text-slate-600">
+              Calling, Transcript Storage, and Audio Recording consents are independent.
+              {isEdit &&
+              ((member?.transcriptConsentStatus === 'GRANTED' &&
+                (transcriptConsentStatus === 'DENIED' || transcriptConsentStatus === 'REVOKED')) ||
+                (member?.recordingConsentStatus === 'GRANTED' &&
+                  (recordingConsentStatus === 'DENIED' || recordingConsentStatus === 'REVOKED'))) ? (
+                <span className="font-semibold text-amber-800">
+                  {' '}
+                  Retention policy: revoking or denying Transcript or Recording consent will
+                  immediately purge previously saved transcript turns or audio recordings for this
+                  patient.
+                </span>
+              ) : null}
+            </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
               <label className="flex items-center justify-between rounded-xl border border-sky-100 bg-white px-3 py-2 text-xs font-semibold text-slate-700">

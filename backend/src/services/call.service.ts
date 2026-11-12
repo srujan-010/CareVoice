@@ -7,16 +7,23 @@ import {
 } from '../adapters/voice/voiceProvider.interface';
 import { withOptionalTransaction } from '../config/database';
 import {
+  env,
   getSarvamWebhookReadiness,
   isMockSimulationAllowed,
   isTelephonyReady,
 } from '../config/env';
-import { getLanguageMeta } from '../constants/languages';
+import {
+  checkSarvamLanguageSupport,
+  getLanguageMeta,
+  tryGetSupportedLanguage,
+} from '../constants/languages';
 import {
   CallLifecycleStatus,
   CallOutcome,
   CallType,
+  LanguageStatus,
   MedicineConfirmationValue,
+  TERMINAL_CALL_LIFECYCLE_STATUSES,
 } from '../constants/statuses';
 import { CallLog } from '../models/CallLog';
 import { CallSchedule } from '../models/CallSchedule';
@@ -43,11 +50,19 @@ import { createEscalation } from './escalation.service';
 import { dispatchFamilyAlert } from './notification.service';
 import {
   SarvamOutboundWebhookPayload,
+  cleanSarvamSentinel,
   dispatchLiveVoiceCall,
   evaluateSarvamAgentOutcome,
+  fetchSarvamAttemptById,
+  fetchSarvamInteraction,
   fetchSarvamRecordingAudio,
+  fetchSarvamTranscript,
   getVoiceAgentStatus,
   mapProviderRawStatusToLifecycle,
+  mapSarvamAnalyticsTranscripts,
+  parseSarvamUtcTimestamp,
+  probeSarvamRecording,
+  resolveSarvamLanguageCode,
   simulateMockVoiceCall,
   verifySarvamAgentDeployment,
 } from './sarvamVoice.service';
@@ -57,6 +72,7 @@ const ACTIVE_CALL_STATUSES: CallLifecycleStatus[] = [
   'QUEUED',
   'INITIATING',
   'RINGING',
+  'ANSWERED',
   'IN_PROGRESS',
 ];
 
@@ -64,7 +80,8 @@ const ACTIVE_STAGE_RANK: Record<string, number> = {
   QUEUED: 0,
   INITIATING: 1,
   RINGING: 2,
-  IN_PROGRESS: 3,
+  ANSWERED: 3,
+  IN_PROGRESS: 4,
 };
 
 export interface SimulateCallInput {
@@ -84,6 +101,9 @@ export interface RealTestCallInput {
   callType?: CallType;
   purpose?: string;
   overrideQuietHours?: boolean;
+  requestedLanguage?: string;
+  fallbackLanguage?: string;
+  allowLanguageFallback?: boolean;
   ipAddress?: string;
 }
 
@@ -130,9 +150,36 @@ function mapOutcomeToLifecycleStatus(outcome: CallOutcome): CallLifecycleStatus 
   if (outcome === 'NO_ANSWER') return 'NO_ANSWER';
   if (outcome === 'BUSY') return 'BUSY';
   if (outcome === 'REJECTED') return 'REJECTED';
+  if (outcome === 'NOT_CONNECTED') return 'NOT_CONNECTED';
   if (outcome === 'FAILED') return 'FAILED';
   if (outcome === 'CANCELLED') return 'CANCELLED';
   return 'COMPLETED';
+}
+
+function computeLanguageVerificationStatus(params: {
+  requestedLanguage?: string;
+  actualLanguageUsed?: string;
+  existingStatus?: LanguageStatus;
+  fallbackAuthorized?: boolean;
+}): LanguageStatus {
+  if (params.fallbackAuthorized || params.existingStatus === 'FALLBACK_AUTHORIZED') {
+    return 'FALLBACK_AUTHORIZED';
+  }
+  if (!params.actualLanguageUsed) {
+    return params.existingStatus || 'MATCHED';
+  }
+  const reqMeta = tryGetSupportedLanguage(params.requestedLanguage);
+  const actMeta = tryGetSupportedLanguage(params.actualLanguageUsed);
+  if (reqMeta && actMeta) {
+    return reqMeta.code === actMeta.code ? 'MATCHED' : 'LANGUAGE_MISMATCH';
+  }
+  if (
+    params.requestedLanguage &&
+    params.actualLanguageUsed.trim().toLowerCase() === params.requestedLanguage.trim().toLowerCase()
+  ) {
+    return 'MATCHED';
+  }
+  return 'LANGUAGE_MISMATCH';
 }
 
 async function applyCallResultToEntities(params: {
@@ -146,64 +193,128 @@ async function applyCallResultToEntities(params: {
   memberName: string;
   languageCode: string;
   recordingConsentGranted: boolean;
+  transcriptConsentGranted?: boolean;
   result: VoiceCallExecutionResult;
+  statusSource?: 'SYSTEM' | 'PROVIDER_API' | 'WEBHOOK' | 'RECONCILIATION' | 'ADMIN';
   callbackId?: Types.ObjectId;
   startedAtOverride?: Date;
+  answeredAtOverride?: Date;
   endedAtOverride?: Date;
 }) {
   const { result } = params;
+  const audioRecordingConsent =
+    result.audioRecordingConsentGranted ?? params.recordingConsentGranted;
+  const transcriptConsent =
+    params.transcriptConsentGranted ??
+    result.transcriptConsentGranted ??
+    params.recordingConsentGranted;
+
+  let transitionedToTerminal = false;
 
   await withOptionalTransaction(async (session) => {
     const callLog = await CallLog.findById(params.callLogId, null, session ? { session } : undefined);
     if (!callLog) throw new NotFoundError('Call log');
 
-    const eventTime = params.endedAtOverride ?? new Date();
+    const now = new Date();
+    const eventTime = params.endedAtOverride ?? now;
     const resolvedCallStatus: CallLifecycleStatus =
       result.callStatus ?? mapOutcomeToLifecycleStatus(result.outcome);
+    const alreadyTerminal = TERMINAL_CALL_LIFECYCLE_STATUSES.includes(callLog.callStatus);
+    const source = params.statusSource ?? (result.provider === 'sarvam' ? 'WEBHOOK' : 'SYSTEM');
 
-    callLog.callStatus = resolvedCallStatus;
-    callLog.outcome = result.outcome;
-    if (params.startedAtOverride && !callLog.startedAt) {
-      callLog.startedAt = params.startedAtOverride;
+    callLog.lastStatusUpdateAt = now;
+    if (params.endedAtOverride) callLog.providerUpdatedAt = params.endedAtOverride;
+
+    if (!alreadyTerminal) {
+      transitionedToTerminal = true;
+      callLog.callStatus = resolvedCallStatus;
+      callLog.outcome = result.outcome;
+      if (params.startedAtOverride && !callLog.startedAt) {
+        callLog.startedAt = params.startedAtOverride;
+      }
+      if (params.answeredAtOverride && !callLog.answeredAt) {
+        callLog.answeredAt = params.answeredAtOverride;
+      } else if (
+        resolvedCallStatus === 'COMPLETED' &&
+        !callLog.answeredAt &&
+        params.startedAtOverride
+      ) {
+        callLog.answeredAt = params.startedAtOverride;
+      }
+      callLog.endedAt = eventTime;
+      callLog.durationSeconds = result.durationSeconds;
+      callLog.mealConfirmed = result.mealConfirmed;
+      callLog.medicineConfirmed = result.medicineConfirmed;
+      callLog.aiSummary = result.aiSummary;
+      if (result.failureReason !== undefined) {
+        callLog.failureReason = cleanSarvamSentinel(result.failureReason) ?? undefined;
+      }
+      callLog.statusHistory.push({
+        status: resolvedCallStatus,
+        timestamp: now,
+        source,
+        note: cleanSarvamSentinel(result.failureReason) || result.aiSummary?.slice(0, 200),
+      });
     }
-    callLog.endedAt = eventTime;
-    callLog.durationSeconds = result.durationSeconds;
-    callLog.mealConfirmed = result.mealConfirmed;
-    callLog.medicineConfirmed = result.medicineConfirmed;
-    callLog.aiSummary = result.aiSummary;
-    callLog.recordingConsentGranted = params.recordingConsentGranted;
-    callLog.transcriptConsentGranted = params.recordingConsentGranted;
-    callLog.transcriptAvailable = params.recordingConsentGranted && result.turns.length > 0;
+
+    callLog.recordingConsentGranted = audioRecordingConsent;
+    callLog.audioRecordingConsentGranted = audioRecordingConsent;
+    callLog.transcriptConsentGranted = transcriptConsent;
+
     if (result.attemptId) callLog.attemptId = result.attemptId;
     if (result.interactionId) callLog.interactionId = result.interactionId;
     if (result.sarvamStatus) callLog.sarvamStatus = result.sarvamStatus;
-    if (result.failureReason !== undefined) callLog.failureReason = result.failureReason;
+    if (result.providerStatusRaw || result.sarvamStatus) {
+      callLog.providerStatusRaw = result.providerStatusRaw || result.sarvamStatus;
+    }
     if (result.channelInfo) callLog.channelInfo = result.channelInfo;
-    if (result.finalAgentVariables !== undefined) {
+    if (result.finalAgentVariables !== undefined && transcriptConsent) {
       callLog.finalAgentVariables = result.finalAgentVariables;
     }
-    callLog.statusHistory.push({
-      status: resolvedCallStatus,
-      timestamp: eventTime,
-      source: result.provider === 'sarvam' ? 'WEBHOOK' : 'SYSTEM',
-      note: result.failureReason || result.aiSummary?.slice(0, 200),
-    });
+
+    if (result.actualLanguageUsed) {
+      callLog.actualLanguageUsed = result.actualLanguageUsed;
+      callLog.languageStatus = computeLanguageVerificationStatus({
+        requestedLanguage: callLog.requestedLanguage || callLog.language,
+        actualLanguageUsed: result.actualLanguageUsed,
+        existingStatus: callLog.languageStatus,
+      });
+    }
+
+    const safeTurns = transcriptConsent ? result.turns : [];
+    const effectiveCallStatus = callLog.callStatus;
+    if (!transcriptConsent) {
+      callLog.transcriptAvailable = false;
+      callLog.transcriptStatus = 'CONSENT_DENIED';
+    } else if (safeTurns.length > 0) {
+      callLog.transcriptAvailable = true;
+      callLog.transcriptStatus = 'AVAILABLE';
+      callLog.transcriptSource =
+        result.transcriptSource ?? (result.provider === 'mock' ? 'MOCK' : 'WEBHOOK');
+    } else if (!callLog.transcriptAvailable) {
+      callLog.transcriptStatus =
+        effectiveCallStatus === 'COMPLETED' && result.provider === 'sarvam'
+          ? 'PENDING'
+          : 'UNAVAILABLE';
+    }
 
     const hasSarvamAudioRef = Boolean(
       result.provider === 'sarvam' &&
         (result.recordingUrl || result.interactionId) &&
-        resolvedCallStatus === 'COMPLETED'
+        effectiveCallStatus === 'COMPLETED'
     );
-    callLog.recordingStatus = !params.recordingConsentGranted
-      ? 'CONSENT_DENIED'
-      : result.recordingWavBase64 || hasSarvamAudioRef
-        ? 'AVAILABLE'
-        : 'UNAVAILABLE';
+    if (!audioRecordingConsent) {
+      callLog.recordingStatus = 'CONSENT_DENIED';
+      callLog.recordingNote = 'Audio recording access denied per patient CALL_RECORDING consent.';
+    } else if (result.recordingWavBase64 || hasSarvamAudioRef) {
+      callLog.recordingStatus = 'AVAILABLE';
+    } else if (callLog.recordingStatus !== 'AVAILABLE') {
+      callLog.recordingStatus = 'UNAVAILABLE';
+    }
+
     await callLog.save(session ? { session } : undefined);
 
-    const safeTurns = params.recordingConsentGranted ? result.turns : [];
-
-    if (safeTurns.length > 0 || result.aiSummary || result.finalAgentVariables) {
+    if (safeTurns.length > 0 || result.aiSummary || (transcriptConsent && result.finalAgentVariables)) {
       await Conversation.findOneAndUpdate(
         { callLogId: callLog._id },
         {
@@ -213,7 +324,13 @@ async function applyCallResultToEntities(params: {
           doseInstanceId: params.doseId,
           ...(result.interactionId ? { interactionId: result.interactionId } : {}),
           language: params.languageCode,
-          turns: safeTurns.map((t) => ({ ...t, timestamp: new Date() })),
+          ...(result.actualLanguageUsed ? { actualLanguageUsed: result.actualLanguageUsed } : {}),
+          ...(callLog.transcriptSource ? { transcriptSource: callLog.transcriptSource } : {}),
+          turns: safeTurns.map((t) => ({
+            ...t,
+            timestamp: t.timestamp ?? new Date(),
+            language: t.language || result.actualLanguageUsed || params.languageCode,
+          })),
           patientResponses: {
             mealFinished: result.mealConfirmed,
             delayMinutes: result.requestedCallbackDelayMinutes,
@@ -226,7 +343,7 @@ async function applyCallResultToEntities(params: {
             feelingUnwell: Boolean(result.feelingUnwell),
             requestedHelp: Boolean(result.requestedHelp),
           },
-          ...(result.finalAgentVariables
+          ...(transcriptConsent && result.finalAgentVariables
             ? { finalAgentVariables: result.finalAgentVariables }
             : {}),
           aiSummary: result.aiSummary,
@@ -236,7 +353,7 @@ async function applyCallResultToEntities(params: {
       );
     }
 
-    if (params.recordingConsentGranted && result.recordingWavBase64) {
+    if (audioRecordingConsent && result.recordingWavBase64) {
       await Recording.findOneAndUpdate(
         { callLogId: callLog._id },
         {
@@ -252,7 +369,7 @@ async function applyCallResultToEntities(params: {
         },
         { upsert: true, new: true, session }
       );
-    } else if (params.recordingConsentGranted && hasSarvamAudioRef) {
+    } else if (audioRecordingConsent && hasSarvamAudioRef) {
       await Recording.findOneAndUpdate(
         { callLogId: callLog._id },
         {
@@ -272,53 +389,60 @@ async function applyCallResultToEntities(params: {
       );
     }
 
-    const dose = await DoseInstance.findById(params.doseId, null, session ? { session } : undefined);
-    if (dose) {
-      // Meal update is strictly isolated from medicine taken confirmation!
-      if (result.mealConfirmed === true) {
-        dose.mealStatus = 'FINISHED';
-      } else if (result.mealConfirmed === false) {
-        dose.mealStatus = 'NOT_FINISHED';
+    if (!alreadyTerminal) {
+      const dose = await DoseInstance.findById(params.doseId, null, session ? { session } : undefined);
+      if (dose) {
+        // Meal update is strictly isolated from medicine taken confirmation!
+        if (result.mealConfirmed === true) {
+          dose.mealStatus = 'FINISHED';
+        } else if (result.mealConfirmed === false) {
+          dose.mealStatus = 'NOT_FINISHED';
+        }
+
+        // Never assume medicine taken from answered call or meal confirmation alone
+        if (result.medicineConfirmed === 'TAKEN') {
+          dose.status = 'PATIENT_REPORTED_TAKEN';
+          dose.confirmedAt = new Date();
+          dose.confirmedByCallId = callLog._id as Types.ObjectId;
+        } else if (result.medicineConfirmed === 'NOT_TAKEN') {
+          dose.status = 'PATIENT_REPORTED_NOT_TAKEN';
+          dose.confirmedAt = new Date();
+          dose.confirmedByCallId = callLog._id as Types.ObjectId;
+        } else if (
+          dose.status === 'PENDING' &&
+          result.outcome !== 'CALLBACK_REQUESTED'
+        ) {
+          dose.status = 'UNCONFIRMED';
+        }
+        await dose.save(session ? { session } : undefined);
       }
 
-      // Never assume medicine taken from answered call or meal confirmation alone
-      if (result.medicineConfirmed === 'TAKEN') {
-        dose.status = 'PATIENT_REPORTED_TAKEN';
-        dose.confirmedAt = new Date();
-        dose.confirmedByCallId = callLog._id as Types.ObjectId;
-      } else if (result.medicineConfirmed === 'NOT_TAKEN') {
-        dose.status = 'PATIENT_REPORTED_NOT_TAKEN';
-        dose.confirmedAt = new Date();
-        dose.confirmedByCallId = callLog._id as Types.ObjectId;
-      } else if (
-        dose.status === 'PENDING' &&
-        result.outcome !== 'CALLBACK_REQUESTED'
-      ) {
-        dose.status = 'UNCONFIRMED';
+      if (params.callbackId) {
+        await Callback.findByIdAndUpdate(
+          params.callbackId,
+          {
+            status:
+              result.outcome === 'COMPLETED' || result.outcome === 'ANSWERED'
+                ? 'COMPLETED'
+                : result.outcome === 'NO_ANSWER' ||
+                    result.outcome === 'BUSY' ||
+                    result.outcome === 'FAILED' ||
+                    result.outcome === 'REJECTED' ||
+                    result.outcome === 'NOT_CONNECTED' ||
+                    result.outcome === 'CANCELLED'
+                  ? 'FAILED'
+                  : 'COMPLETED',
+            resultingCallLogId: callLog._id,
+          },
+          session ? { session } : undefined
+        );
       }
-      await dose.save(session ? { session } : undefined);
-    }
-
-    if (params.callbackId) {
-      await Callback.findByIdAndUpdate(
-        params.callbackId,
-        {
-          status:
-            result.outcome === 'COMPLETED' || result.outcome === 'ANSWERED'
-              ? 'COMPLETED'
-              : result.outcome === 'NO_ANSWER' ||
-                  result.outcome === 'BUSY' ||
-                  result.outcome === 'FAILED' ||
-                  result.outcome === 'REJECTED' ||
-                  result.outcome === 'CANCELLED'
-                ? 'FAILED'
-                : 'COMPLETED',
-          resultingCallLogId: callLog._id,
-        },
-        session ? { session } : undefined
-      );
     }
   });
+
+  if (!transitionedToTerminal) {
+    return;
+  }
 
   // Trigger escalations & notifications outside or after primary persistence
   if (result.feelingUnwell || result.requestedHelp || result.outcome === 'ESCALATED') {
@@ -345,11 +469,12 @@ async function applyCallResultToEntities(params: {
     result.outcome === 'NO_ANSWER' ||
     result.outcome === 'BUSY' ||
     result.outcome === 'REJECTED' ||
+    result.outcome === 'NOT_CONNECTED' ||
     result.outcome === 'FAILED'
   ) {
     const missedCount = await CallLog.countDocuments({
       doseInstanceId: params.doseId,
-      outcome: { $in: ['NO_ANSWER', 'BUSY', 'REJECTED', 'FAILED'] },
+      outcome: { $in: ['NO_ANSWER', 'BUSY', 'REJECTED', 'NOT_CONNECTED', 'FAILED'] },
     });
     if (missedCount >= 2) {
       await createEscalation({
@@ -409,7 +534,10 @@ export async function getCallPreflight(options: { verifyDeployment?: boolean } =
 
   return {
     ...baseStatus,
-    liveCallingAllowed: baseStatus.telephonyReady && baseStatus.webhookReady,
+    liveCallingAllowed:
+      baseStatus.telephonyReady &&
+      baseStatus.webhookReady &&
+      (!deploymentCheck || deploymentCheck.verified),
     deploymentCheck,
   };
 }
@@ -443,6 +571,7 @@ export async function simulateCallForDose(input: SimulateCallInput) {
   const callType: CallType = input.callType ?? 'MEDICINE_REMINDER';
   const now = new Date();
   const recordingConsentGranted = member.recordingConsentStatus === 'GRANTED';
+  const transcriptConsentGranted = (member.transcriptConsentStatus ?? 'PENDING') === 'GRANTED';
 
   const callLog = await CallLog.create({
     familyId: dose.familyId,
@@ -474,17 +603,23 @@ export async function simulateCallForDose(input: SimulateCallInput) {
       },
     ],
     recordingConsentGranted,
-    transcriptConsentGranted: recordingConsentGranted,
+    audioRecordingConsentGranted: recordingConsentGranted,
+    transcriptConsentGranted,
+    lastStatusUpdateAt: now,
     queuedAt: now,
     initiatingAt: now,
     callType,
     phoneNumber: member.phoneNumber,
     language: langMeta.code,
+    requestedLanguage: langMeta.code,
+    actualLanguageUsed: langMeta.code,
+    languageStatus: 'MATCHED',
     scheduledAt: dose.scheduledAt,
     startedAt: now,
     durationSeconds: 0,
     outcome: 'PENDING',
     recordingStatus: recordingConsentGranted ? 'PROCESSING' : 'CONSENT_DENIED',
+    transcriptStatus: transcriptConsentGranted ? 'PENDING' : 'CONSENT_DENIED',
     transcriptAvailable: false,
     mealConfirmed: null,
     medicineConfirmed: 'UNCONFIRMED',
@@ -498,13 +633,16 @@ export async function simulateCallForDose(input: SimulateCallInput) {
     phoneNumber: member.phoneNumber,
     languageCode: langMeta.code,
     languageBcp47: langMeta.bcp47,
+    languageName: langMeta.name,
     voiceGender: member.callingPreferences?.preferredVoiceGender ?? 'FEMALE',
     recordingConsentGranted,
+    transcriptConsentGranted,
     medicineId: String(medicine._id),
     medicineName: medicine.name,
     dosage: medicine.dosage,
     foodInstruction: dose.foodInstruction,
     associatedMeal: dose.associatedMeal,
+    slotLabel: dose.slotLabel,
     prescribedInstructions: medicine.prescribedInstructions,
     doseInstanceId: String(dose._id),
     callType,
@@ -531,7 +669,12 @@ export async function simulateCallForDose(input: SimulateCallInput) {
     memberName: member.fullName,
     languageCode: langMeta.code,
     recordingConsentGranted,
-    result: simResult,
+    transcriptConsentGranted,
+    result: {
+      ...simResult,
+      actualLanguageUsed: langMeta.code,
+      transcriptSource: 'MOCK',
+    },
   });
 
   await recordAudit({
@@ -690,8 +833,111 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
     );
   }
 
-  const langMeta = getLanguageMeta(member.preferredLanguage);
+  const requestedCode = input.requestedLanguage?.trim() || member.preferredLanguage;
+  const primaryLangCheck = checkSarvamLanguageSupport(
+    requestedCode,
+    env.SARVAM_ALLOWED_LANGUAGES
+  );
+  let effectiveLangMeta = primaryLangCheck.language ?? getLanguageMeta(requestedCode);
+  let languageStatus: LanguageStatus = 'MATCHED';
+  let fallbackLanguageUsed: string | undefined;
+
+  if (!primaryLangCheck.supported || !primaryLangCheck.language) {
+    if (input.allowLanguageFallback && input.fallbackLanguage) {
+      const fbCheck = checkSarvamLanguageSupport(
+        input.fallbackLanguage,
+        env.SARVAM_ALLOWED_LANGUAGES
+      );
+      if (!fbCheck.supported || !fbCheck.language) {
+        throw new AppError(
+          fbCheck.reason || `Fallback language "${input.fallbackLanguage}" is not supported`,
+          422,
+          'LANGUAGE_FALLBACK_REQUIRED',
+          {
+            requestedLanguage: requestedCode,
+            availableFallbackLanguages: fbCheck.availableFallbackLanguages,
+            requiresFallbackPermission: true,
+          }
+        );
+      }
+      effectiveLangMeta = fbCheck.language;
+      fallbackLanguageUsed = fbCheck.language.code;
+      languageStatus = 'FALLBACK_AUTHORIZED';
+    } else {
+      const blockedReason =
+        primaryLangCheck.reason ||
+        `Preferred language "${requestedCode}" is unavailable on Sarvam; explicit fallback permission is required before calling.`;
+      const blockedLog = await CallLog.create({
+        familyId: dose.familyId,
+        familyMemberId: member._id,
+        medicineId: medicine._id,
+        doseInstanceId: dose._id,
+        initiatedByUserId: new Types.ObjectId(input.actorUserId),
+        provider: 'sarvam',
+        mode: 'live',
+        isMock: false,
+        isTestCall: true,
+        callPurpose:
+          input.purpose?.trim() ||
+          `Language fallback check for ${medicine.name} (${medicine.dosage})`,
+        callStatus: 'LANGUAGE_FALLBACK_REQUIRED',
+        outcome: 'FAILED',
+        failureReason: blockedReason,
+        lastStatusUpdateAt: now,
+        statusHistory: [
+          {
+            status: 'LANGUAGE_FALLBACK_REQUIRED',
+            timestamp: now,
+            source: 'SYSTEM',
+            note: blockedReason,
+          },
+        ],
+        recordingConsentGranted: member.recordingConsentStatus === 'GRANTED',
+        audioRecordingConsentGranted: member.recordingConsentStatus === 'GRANTED',
+        transcriptConsentGranted: (member.transcriptConsentStatus ?? 'PENDING') === 'GRANTED',
+        callType,
+        phoneNumber: validatedPhone,
+        language: requestedCode,
+        requestedLanguage: requestedCode,
+        languageStatus: 'LANGUAGE_FALLBACK_REQUIRED',
+        scheduledAt: dose.scheduledAt,
+        startedAt: now,
+        endedAt: now,
+        durationSeconds: 0,
+        recordingStatus:
+          member.recordingConsentStatus === 'GRANTED' ? 'UNAVAILABLE' : 'CONSENT_DENIED',
+        transcriptStatus:
+          (member.transcriptConsentStatus ?? 'PENDING') === 'GRANTED'
+            ? 'UNAVAILABLE'
+            : 'CONSENT_DENIED',
+        transcriptAvailable: false,
+        mealConfirmed: null,
+        medicineConfirmed: 'UNCONFIRMED',
+        aiSummary: blockedReason,
+      });
+
+      await recordAudit({
+        familyId: input.familyId,
+        actorType: 'USER',
+        actorId: input.actorUserId,
+        action: 'REAL_TEST_CALL_LANGUAGE_FALLBACK_REQUIRED',
+        resourceType: 'CallLog',
+        resourceId: String(blockedLog._id),
+        ipAddress: input.ipAddress,
+        metadata: { requestedLanguage: requestedCode },
+      });
+
+      throw new AppError(blockedReason, 422, 'LANGUAGE_FALLBACK_REQUIRED', {
+        callLogId: String(blockedLog._id),
+        requestedLanguage: requestedCode,
+        availableFallbackLanguages: primaryLangCheck.availableFallbackLanguages,
+        requiresFallbackPermission: true,
+      });
+    }
+  }
+
   const recordingConsentGranted = member.recordingConsentStatus === 'GRANTED';
+  const transcriptConsentGranted = (member.transcriptConsentStatus ?? 'PENDING') === 'GRANTED';
   const callPurpose =
     input.purpose?.trim() ||
     `Admin-authorized real test call (${callType.replace(/_/g, ' ')}) for ${medicine.name} (${medicine.dosage})`;
@@ -736,27 +982,39 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
         status: 'INITIATING',
         timestamp: now,
         source: 'SYSTEM',
-        note: 'Safety, consent, E.164, and deployment checks passed; calling Sarvam Outbound API',
+        note: `Safety, consent, E.164, language (${effectiveLangMeta.name}), and deployment checks passed; calling Sarvam Outbound API`,
       },
     ],
     recordingConsentGranted,
-    transcriptConsentGranted: recordingConsentGranted,
+    audioRecordingConsentGranted: recordingConsentGranted,
+    transcriptConsentGranted,
+    lastStatusUpdateAt: now,
     queuedAt: now,
     initiatingAt: now,
     callType,
     phoneNumber: validatedPhone,
-    language: langMeta.code,
+    language: effectiveLangMeta.code,
+    requestedLanguage: requestedCode,
+    fallbackLanguage: fallbackLanguageUsed,
+    fallbackAuthorizedByUserId: fallbackLanguageUsed
+      ? new Types.ObjectId(input.actorUserId)
+      : undefined,
+    languageStatus,
     scheduledAt: dose.scheduledAt,
     startedAt: now,
     durationSeconds: 0,
     outcome: 'PENDING',
     recordingStatus: recordingConsentGranted ? 'PROCESSING' : 'CONSENT_DENIED',
+    transcriptStatus: transcriptConsentGranted ? 'PENDING' : 'CONSENT_DENIED',
     transcriptAvailable: false,
     mealConfirmed: null,
     medicineConfirmed: 'UNCONFIRMED',
     contextSnapshot: {
       patientName: member.fullName,
-      languageBcp47: langMeta.bcp47,
+      requestedLanguage: requestedCode,
+      effectiveLanguage: effectiveLangMeta.code,
+      languageBcp47: effectiveLangMeta.bcp47,
+      languageName: effectiveLangMeta.sarvamInitialLanguageName || effectiveLangMeta.name,
       medicineName: medicine.name,
       dosage: medicine.dosage,
       slotLabel: dose.slotLabel,
@@ -764,10 +1022,11 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
       foodInstruction: dose.foodInstruction,
       prescribedInstructions: medicine.prescribedInstructions,
       recordingConsentStatus: member.recordingConsentStatus,
+      transcriptConsentStatus: member.transcriptConsentStatus ?? 'PENDING',
       voiceCallingConsentStatus: member.voiceCallingConsentStatus,
       deploymentStatus: deploymentCheck.status,
     },
-    aiSummary: `Initiating live Sarvam outbound call to ${member.fullName}...`,
+    aiSummary: `Initiating live Sarvam outbound call in ${effectiveLangMeta.name} to ${member.fullName}...`,
   });
 
   const context: VoiceCallContextPayload = {
@@ -776,15 +1035,18 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
     familyMemberId: String(member._id),
     patientName: member.fullName,
     phoneNumber: validatedPhone,
-    languageCode: langMeta.code,
-    languageBcp47: langMeta.bcp47,
+    languageCode: effectiveLangMeta.code,
+    languageBcp47: effectiveLangMeta.bcp47,
+    languageName: effectiveLangMeta.sarvamInitialLanguageName || effectiveLangMeta.name,
     voiceGender: member.callingPreferences?.preferredVoiceGender ?? 'FEMALE',
     recordingConsentGranted,
+    transcriptConsentGranted,
     medicineId: String(medicine._id),
     medicineName: medicine.name,
     dosage: medicine.dosage,
     foodInstruction: dose.foodInstruction,
     associatedMeal: dose.associatedMeal,
+    slotLabel: dose.slotLabel,
     prescribedInstructions: medicine.prescribedInstructions,
     doseInstanceId: String(dose._id),
     callType,
@@ -804,22 +1066,29 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
     callLog.attemptId = liveRes.attemptId;
     callLog.providerCallId = liveRes.providerCallId;
     callLog.callStatus = safeLifecycle;
+    callLog.sarvamStatus = liveRes.rawStatus.trim().toLowerCase();
+    callLog.providerStatusRaw = liveRes.rawStatus;
+    callLog.lastStatusUpdateAt = acceptedAt;
     if (safeLifecycle === 'RINGING') callLog.ringingAt = acceptedAt;
-    if (safeLifecycle === 'IN_PROGRESS') callLog.answeredAt = acceptedAt;
+    if (safeLifecycle === 'ANSWERED' || safeLifecycle === 'IN_PROGRESS') {
+      callLog.answeredAt = acceptedAt;
+    }
     callLog.providerResponseMeta = {
       accepted: liveRes.accepted,
       attemptId: liveRes.attemptId,
       rawStatus: liveRes.rawStatus,
       httpStatus: liveRes.httpStatus,
       deploymentStatus: deploymentCheck.status,
+      requestedLanguage: requestedCode,
+      effectiveLanguage: effectiveLangMeta.code,
     };
     callLog.statusHistory.push({
       status: safeLifecycle,
       timestamp: acceptedAt,
       source: 'PROVIDER_API',
-      note: `Sarvam accepted outbound call (attempt_id: ${liveRes.attemptId}, status: ${liveRes.rawStatus})`,
+      note: `Sarvam accepted outbound call (attempt_id: ${liveRes.attemptId}, status: ${liveRes.rawStatus}, language: ${effectiveLangMeta.name})`,
     });
-    callLog.aiSummary = `Sarvam outbound call accepted (attempt_id: ${liveRes.attemptId}). Dialing ${member.fullName}; awaiting live webhook events. Dose remains ${dose.status}.`;
+    callLog.aiSummary = `Sarvam outbound call accepted (attempt_id: ${liveRes.attemptId}). Dialing ${member.fullName} in ${effectiveLangMeta.name}; awaiting live webhook/reconciliation status. Dose remains ${dose.status}.`;
     await callLog.save();
 
     await recordAudit({
@@ -834,7 +1103,10 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
         attemptId: liveRes.attemptId,
         rawStatus: liveRes.rawStatus,
         callType,
+        requestedLanguage: requestedCode,
+        effectiveLanguage: effectiveLangMeta.code,
         recordingConsentGranted,
+        transcriptConsentGranted,
         isTestCall: true,
       },
     });
@@ -853,10 +1125,18 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Sarvam outbound dispatch failed';
     const failedAt = new Date();
-    callLog.callStatus = 'FAILED';
+    const isLangFallbackRequired =
+      err instanceof AppError && err.code === 'LANGUAGE_FALLBACK_REQUIRED';
+
+    callLog.callStatus = isLangFallbackRequired ? 'LANGUAGE_FALLBACK_REQUIRED' : 'FAILED';
     callLog.outcome = 'FAILED';
     callLog.sarvamStatus = 'failed';
+    callLog.providerStatusRaw = isLangFallbackRequired ? 'LANGUAGE_UNAVAILABLE' : 'failed';
+    if (isLangFallbackRequired) {
+      callLog.languageStatus = 'LANGUAGE_UNAVAILABLE';
+    }
     callLog.endedAt = failedAt;
+    callLog.lastStatusUpdateAt = failedAt;
     callLog.failureReason = msg.slice(0, 1000);
     callLog.providerResponseMeta = {
       error: msg.slice(0, 500),
@@ -864,25 +1144,30 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
       details: err instanceof AppError ? err.details : undefined,
     };
     callLog.statusHistory.push({
-      status: 'FAILED',
+      status: callLog.callStatus,
       timestamp: failedAt,
       source: 'PROVIDER_API',
       note: msg.slice(0, 400),
     });
-    callLog.aiSummary = `Live Sarvam outbound call failed before connecting: ${msg}`;
+    callLog.aiSummary = isLangFallbackRequired
+      ? `Language "${effectiveLangMeta.name}" rejected by Sarvam: ${msg}`
+      : `Live Sarvam outbound call failed before connecting: ${msg}`;
     await callLog.save();
 
     await recordAudit({
       familyId: input.familyId,
       actorType: 'USER',
       actorId: input.actorUserId,
-      action: 'REAL_TEST_CALL_FAILED',
+      action: isLangFallbackRequired
+        ? 'REAL_TEST_CALL_LANGUAGE_FALLBACK_REQUIRED'
+        : 'REAL_TEST_CALL_FAILED',
       resourceType: 'CallLog',
       resourceId: String(callLog._id),
       ipAddress: input.ipAddress,
       metadata: {
         error: msg.slice(0, 300),
         callType,
+        requestedLanguage: requestedCode,
       },
     });
 
@@ -914,6 +1199,7 @@ export async function recordExternalCallEvent(input: ProcessCallEventInput) {
   if (!member || !medicine) throw new NotFoundError('Patient or medicine');
 
   const recordingConsentGranted = member.recordingConsentStatus === 'GRANTED';
+  const transcriptConsentGranted = (member.transcriptConsentStatus ?? 'PENDING') === 'GRANTED';
 
   const execResult: VoiceCallExecutionResult = {
     provider: callLog.provider,
@@ -926,7 +1212,9 @@ export async function recordExternalCallEvent(input: ProcessCallEventInput) {
     medicineConfirmed: input.medicineConfirmed ?? 'UNCONFIRMED',
     feelingUnwell: input.feelingUnwell,
     requestedHelp: input.requestedHelp,
-    turns: recordingConsentGranted ? input.turns ?? [] : [],
+    audioRecordingConsentGranted: recordingConsentGranted,
+    transcriptConsentGranted,
+    turns: transcriptConsentGranted ? input.turns ?? [] : [],
     aiSummary:
       input.aiSummary ||
       `Call ${input.outcome} for ${member.fullName} regarding ${medicine.name}.`,
@@ -947,6 +1235,7 @@ export async function recordExternalCallEvent(input: ProcessCallEventInput) {
     memberName: member.fullName,
     languageCode: callLog.language,
     recordingConsentGranted,
+    transcriptConsentGranted,
     result: execResult,
     callbackId: callLog.callbackId,
   });
@@ -1030,11 +1319,15 @@ export async function processSarvamOutboundWebhook(
     throw new NotFoundError('Correlated patient, medicine, or dose instance');
   }
 
+  const rawStatus = (payload.status || payload.connectivity_status || '')
+    .toString()
+    .trim()
+    .toLowerCase();
   const eventSuffix =
     typeof payload.event_id === 'string' && payload.event_id.trim()
       ? payload.event_id.trim()
       : payload.interaction_id || 'none';
-  const idempotencyKey = `sarvam:${attemptId}:${payload.status}:${eventSuffix}`;
+  const idempotencyKey = `sarvam:${attemptId}:${rawStatus}:${eventSuffix}`;
 
   const claimed = await CallLog.findOneAndUpdate(
     {
@@ -1064,49 +1357,89 @@ export async function processSarvamOutboundWebhook(
 
   try {
     const recordingConsentGranted =
-      callLog.recordingConsentGranted !== false && member.recordingConsentStatus === 'GRANTED';
+      callLog.audioRecordingConsentGranted !== false &&
+      callLog.recordingConsentGranted !== false &&
+      member.recordingConsentStatus === 'GRANTED';
+    const transcriptConsentGranted =
+      callLog.transcriptConsentGranted !== false &&
+      (member.transcriptConsentStatus ?? 'PENDING') === 'GRANTED';
 
     const evaluated = evaluateSarvamAgentOutcome(payload, member.fullName, medicine.name, {
       recordingConsentGranted,
+      transcriptConsentGranted,
     });
 
-    const parsedStartedAt =
-      payload.started_at && !Number.isNaN(Date.parse(payload.started_at))
-        ? new Date(payload.started_at)
-        : undefined;
-    const parsedEndedAt =
-      payload.ended_at && !Number.isNaN(Date.parse(payload.ended_at))
-        ? new Date(payload.ended_at)
-        : undefined;
+    const parsedStartedAt = parseSarvamUtcTimestamp(payload.started_at);
+    const parsedAnsweredAt = parseSarvamUtcTimestamp(payload.answered_at);
+    const parsedEndedAt = parseSarvamUtcTimestamp(payload.ended_at);
+    const receivedAt = new Date();
+    const cleanReason = cleanSarvamSentinel(payload.failure_reason);
+
+    const sanitizedWebhookEntry = {
+      eventId:
+        typeof payload.event_id === 'string' && payload.event_id.trim()
+          ? payload.event_id.trim()
+          : `${rawStatus || 'unknown'}:${receivedAt.getTime()}`,
+      receivedAt,
+      source: 'WEBHOOK' as const,
+      rawStatus: rawStatus || 'unknown',
+      mappedStatus: evaluated.callStatus,
+      sanitizedPayload: {
+        eventType: typeof payload.event_type === 'string' ? payload.event_type : undefined,
+        interactionId: payload.interaction_id || undefined,
+        durationSeconds:
+          typeof payload.duration === 'number' && Number.isFinite(payload.duration)
+            ? Math.round(payload.duration)
+            : undefined,
+        failureReason: cleanReason,
+        endedBy: cleanSarvamSentinel(payload.ended_by),
+        languageName: cleanSarvamSentinel(payload.language_name),
+      },
+    };
+
+    claimed.webhookEvents = claimed.webhookEvents || [];
+    claimed.webhookEvents.push(sanitizedWebhookEntry);
+    claimed.lastStatusUpdateAt = receivedAt;
+    if (parsedEndedAt) claimed.providerUpdatedAt = parsedEndedAt;
 
     if (evaluated.isIntermediateEvent) {
-      const stageTime = new Date();
       const isStillActive = ACTIVE_CALL_STATUSES.includes(claimed.callStatus);
       const currentRank = ACTIVE_STAGE_RANK[claimed.callStatus] ?? -1;
       const incomingRank = ACTIVE_STAGE_RANK[evaluated.callStatus] ?? 0;
 
       if (isStillActive && incomingRank >= currentRank) {
         claimed.callStatus = evaluated.callStatus;
-        claimed.sarvamStatus = payload.status;
+        claimed.sarvamStatus = rawStatus;
+        claimed.providerStatusRaw = rawStatus;
         if (parsedStartedAt) claimed.startedAt = parsedStartedAt;
-        if (evaluated.callStatus === 'RINGING') claimed.ringingAt = stageTime;
-        if (evaluated.callStatus === 'IN_PROGRESS') claimed.answeredAt = stageTime;
+        if (evaluated.callStatus === 'RINGING') claimed.ringingAt = receivedAt;
+        if (evaluated.callStatus === 'ANSWERED' || evaluated.callStatus === 'IN_PROGRESS') {
+          claimed.answeredAt = parsedAnsweredAt || claimed.answeredAt || receivedAt;
+        }
         if (payload.interaction_id) claimed.interactionId = payload.interaction_id;
         if (payload.channel_info) claimed.channelInfo = payload.channel_info;
+        if (evaluated.actualLanguageUsed) {
+          claimed.actualLanguageUsed = evaluated.actualLanguageUsed;
+          claimed.languageStatus = computeLanguageVerificationStatus({
+            requestedLanguage: claimed.requestedLanguage || claimed.language,
+            actualLanguageUsed: evaluated.actualLanguageUsed,
+            existingStatus: claimed.languageStatus,
+          });
+        }
         claimed.aiSummary = evaluated.aiSummary;
         claimed.statusHistory.push({
           status: evaluated.callStatus,
-          timestamp: stageTime,
+          timestamp: receivedAt,
           source: 'WEBHOOK',
-          note: `Sarvam webhook lifecycle transition: ${payload.status}`,
+          note: `Sarvam webhook lifecycle transition: ${rawStatus}`,
         });
         await claimed.save();
       } else {
         claimed.statusHistory.push({
           status: claimed.callStatus,
-          timestamp: stageTime,
+          timestamp: receivedAt,
           source: 'WEBHOOK',
-          note: `Ignored out-of-order Sarvam stage (${payload.status}) while call in ${claimed.callStatus}`,
+          note: `Ignored out-of-order Sarvam stage (${rawStatus}) while call in ${claimed.callStatus}`,
         });
         await claimed.save();
       }
@@ -1121,7 +1454,7 @@ export async function processSarvamOutboundWebhook(
         ipAddress: auditMeta?.ipAddress,
         metadata: {
           attemptId,
-          sarvamStatus: payload.status,
+          sarvamStatus: rawStatus,
           callStatus: evaluated.callStatus,
         },
       });
@@ -1139,6 +1472,8 @@ export async function processSarvamOutboundWebhook(
       };
     }
 
+    await claimed.save();
+
     const execResult: VoiceCallExecutionResult = {
       provider: 'sarvam',
       mode: 'live',
@@ -1146,15 +1481,21 @@ export async function processSarvamOutboundWebhook(
       providerCallId: attemptId,
       attemptId,
       interactionId: payload.interaction_id ?? undefined,
-      sarvamStatus: payload.status,
-      failureReason: payload.failure_reason ?? undefined,
+      sarvamStatus: rawStatus,
+      providerStatusRaw: rawStatus,
+      failureReason: cleanReason,
       channelInfo: payload.channel_info ?? undefined,
-      finalAgentVariables: payload.final_agent_variables ?? undefined,
+      finalAgentVariables: transcriptConsentGranted
+        ? (payload.final_agent_variables ?? undefined)
+        : undefined,
       recordingUrl:
         recordingConsentGranted && typeof payload.recording_url === 'string'
           ? payload.recording_url
           : undefined,
-      transcriptConsentGranted: recordingConsentGranted,
+      audioRecordingConsentGranted: recordingConsentGranted,
+      transcriptConsentGranted,
+      transcriptSource: 'WEBHOOK',
+      actualLanguageUsed: evaluated.actualLanguageUsed,
       outcome: evaluated.outcome,
       durationSeconds: evaluated.durationSeconds,
       mealConfirmed: evaluated.mealConfirmed,
@@ -1178,9 +1519,12 @@ export async function processSarvamOutboundWebhook(
       memberName: member.fullName,
       languageCode: callLog.language,
       recordingConsentGranted,
+      transcriptConsentGranted,
       result: execResult,
+      statusSource: 'WEBHOOK',
       callbackId: callLog.callbackId,
       startedAtOverride: parsedStartedAt,
+      answeredAtOverride: parsedAnsweredAt,
       endedAtOverride: parsedEndedAt,
     });
 
@@ -1195,11 +1539,13 @@ export async function processSarvamOutboundWebhook(
       metadata: {
         attemptId,
         interactionId: payload.interaction_id ?? null,
-        sarvamStatus: payload.status,
+        sarvamStatus: rawStatus,
         callStatus: evaluated.callStatus,
         mappedOutcome: evaluated.outcome,
         medicineConfirmed: evaluated.medicineConfirmed,
         recordingConsentGranted,
+        transcriptConsentGranted,
+        actualLanguageUsed: evaluated.actualLanguageUsed ?? null,
         patientId: String(member._id),
         doseId: String(dose._id),
       },
@@ -1326,7 +1672,57 @@ export async function executeScheduledCallJob(callScheduleId: string): Promise<v
   const telephony = isTelephonyReady();
   const webhook = getSarvamWebhookReadiness();
   const recordingConsentGranted = member.recordingConsentStatus === 'GRANTED';
+  const transcriptConsentGranted = (member.transcriptConsentStatus ?? 'PENDING') === 'GRANTED';
   const now = new Date();
+
+  if (telephony.ready) {
+    const langSupport = checkSarvamLanguageSupport(
+      member.preferredLanguage,
+      env.SARVAM_ALLOWED_LANGUAGES
+    );
+    if (!langSupport.supported || !langSupport.language) {
+      const reason =
+        langSupport.reason ||
+        `Preferred language "${member.preferredLanguage}" is not supported on Sarvam; scheduled call skipped to avoid wrong-language Hindi fallback.`;
+      await CallLog.create({
+        familyId: job.familyId,
+        familyMemberId: job.familyMemberId,
+        medicineId: job.medicineId,
+        doseInstanceId: job.doseInstanceId,
+        callScheduleId: job._id,
+        callbackId: job.callbackId,
+        provider: 'sarvam',
+        mode: 'live',
+        isMock: false,
+        isTestCall: false,
+        callPurpose: `Scheduled ${job.callType.replace(/_/g, ' ').toLowerCase()}`,
+        callStatus: 'LANGUAGE_UNAVAILABLE',
+        outcome: 'FAILED',
+        failureReason: reason,
+        lastStatusUpdateAt: now,
+        recordingConsentGranted,
+        audioRecordingConsentGranted: recordingConsentGranted,
+        transcriptConsentGranted,
+        callType: job.callType,
+        phoneNumber: member.phoneNumber,
+        language: member.preferredLanguage,
+        requestedLanguage: member.preferredLanguage,
+        languageStatus: 'LANGUAGE_UNAVAILABLE',
+        scheduledAt: job.scheduledFor,
+        startedAt: now,
+        endedAt: now,
+        durationSeconds: 0,
+        recordingStatus: recordingConsentGranted ? 'UNAVAILABLE' : 'CONSENT_DENIED',
+        transcriptStatus: transcriptConsentGranted ? 'UNAVAILABLE' : 'CONSENT_DENIED',
+        transcriptAvailable: false,
+        mealConfirmed: null,
+        medicineConfirmed: 'UNCONFIRMED',
+        aiSummary: reason,
+      });
+      await skipClaimedJob(reason, 'FAILED');
+      return;
+    }
+  }
 
   if (telephony.ready && webhook.ready) {
     const existingActiveCall = await CallLog.findOne({
@@ -1372,17 +1768,22 @@ export async function executeScheduledCallJob(callScheduleId: string): Promise<v
       },
     ],
     recordingConsentGranted,
-    transcriptConsentGranted: recordingConsentGranted,
+    audioRecordingConsentGranted: recordingConsentGranted,
+    transcriptConsentGranted,
+    lastStatusUpdateAt: now,
     queuedAt: job.scheduledFor,
     initiatingAt: now,
     callType: job.callType,
     phoneNumber: member.phoneNumber,
     language: langMeta.code,
+    requestedLanguage: langMeta.code,
+    languageStatus: 'MATCHED',
     scheduledAt: job.scheduledFor,
     startedAt: now,
     durationSeconds: 0,
     outcome: 'PENDING',
     recordingStatus: recordingConsentGranted ? 'PROCESSING' : 'CONSENT_DENIED',
+    transcriptStatus: transcriptConsentGranted ? 'PENDING' : 'CONSENT_DENIED',
     transcriptAvailable: false,
     mealConfirmed: null,
     medicineConfirmed: 'UNCONFIRMED',
@@ -1402,13 +1803,16 @@ export async function executeScheduledCallJob(callScheduleId: string): Promise<v
         phoneNumber: validatedPhone,
         languageCode: langMeta.code,
         languageBcp47: langMeta.bcp47,
+        languageName: langMeta.sarvamInitialLanguageName || langMeta.name,
         voiceGender: member.callingPreferences?.preferredVoiceGender ?? 'FEMALE',
         recordingConsentGranted,
+        transcriptConsentGranted,
         medicineId: String(medicine._id),
         medicineName: medicine.name,
         dosage: medicine.dosage,
         foodInstruction: dose.foodInstruction,
         associatedMeal: dose.associatedMeal,
+        slotLabel: dose.slotLabel,
         prescribedInstructions: medicine.prescribedInstructions,
         doseInstanceId: String(dose._id),
         callType: job.callType,
@@ -1547,16 +1951,413 @@ export async function listCalls(
     .lean();
 }
 
-export async function getCallStatusSnapshot(familyId: string, callLogId: string) {
+/**
+ * Reconciles a live Sarvam CallLog with Sarvam Analytics APIs (`GET /attempts`,
+ * `GET /interactions?include_transcript=true`, `GET /transcripts/{interaction_id}`,
+ * and `GET /recordings/{interaction_id}` probe).
+ * Safe to invoke periodically during polling or manually; stops querying once
+ * call reaches terminal state and available transcript/language/recording resolve.
+ */
+async function reconcileSarvamCallInternal(params: {
+  familyId: string;
+  callLogId: string;
+  force?: boolean;
+}): Promise<{ reconciled: boolean; updated: boolean }> {
+  if (!Types.ObjectId.isValid(params.callLogId)) return { reconciled: false, updated: false };
+
+  const callLog = await CallLog.findOne({
+    _id: new Types.ObjectId(params.callLogId),
+    familyId: new Types.ObjectId(params.familyId),
+  });
+  if (!callLog) return { reconciled: false, updated: false };
+  if (callLog.provider !== 'sarvam' || callLog.mode !== 'live' || !callLog.attemptId) {
+    return { reconciled: false, updated: false };
+  }
+
+  const [member, medicine, existingConv] = await Promise.all([
+    FamilyMember.findOne({ _id: callLog.familyMemberId, familyId: callLog.familyId }).lean(),
+    callLog.medicineId
+      ? Medicine.findOne({ _id: callLog.medicineId, familyId: callLog.familyId }).lean()
+      : Promise.resolve(null),
+    Conversation.findOne({ callLogId: callLog._id, familyId: callLog.familyId }),
+  ]);
+  if (!member || !medicine) return { reconciled: false, updated: false };
+
+  const recordingConsentGranted =
+    callLog.audioRecordingConsentGranted !== false &&
+    callLog.recordingConsentGranted !== false &&
+    member.recordingConsentStatus === 'GRANTED';
+  const transcriptConsentGranted =
+    callLog.transcriptConsentGranted !== false &&
+    (member.transcriptConsentStatus ?? 'PENDING') === 'GRANTED';
+
+  const isActive = ACTIVE_CALL_STATUSES.includes(callLog.callStatus);
+  const needsTranscript =
+    transcriptConsentGranted &&
+    callLog.callStatus === 'COMPLETED' &&
+    (!existingConv || !existingConv.turns || existingConv.turns.length === 0);
+  const needsLanguage = callLog.callStatus === 'COMPLETED' && !callLog.actualLanguageUsed;
+  const needsInteractionId = callLog.callStatus === 'COMPLETED' && !callLog.interactionId;
+  const needsRecordingProbe =
+    recordingConsentGranted &&
+    callLog.callStatus === 'COMPLETED' &&
+    Boolean(callLog.interactionId) &&
+    callLog.recordingStatus === 'PROCESSING';
+
+  if (
+    !params.force &&
+    !isActive &&
+    !needsTranscript &&
+    !needsLanguage &&
+    !needsInteractionId &&
+    !needsRecordingProbe
+  ) {
+    return { reconciled: false, updated: false };
+  }
+
+  if (
+    !params.force &&
+    callLog.lastReconciledAt &&
+    Date.now() - new Date(callLog.lastReconciledAt).getTime() < 5000
+  ) {
+    return { reconciled: false, updated: false };
+  }
+
+  const now = new Date();
+  callLog.lastReconciledAt = now;
+  let updated = false;
+  let interactionId = callLog.interactionId;
+  let actualLanguageUsed = callLog.actualLanguageUsed;
+  let recoveredVars = callLog.finalAgentVariables;
+
+  // 1) Query GET /attempts to recover missed terminal webhook or provider metadata
+  if (isActive || needsInteractionId || needsLanguage || params.force) {
+    const attemptRes = await fetchSarvamAttemptById(callLog.attemptId, callLog.createdAt);
+    if (attemptRes.found && attemptRes.attempt) {
+      const att = attemptRes.attempt;
+      const attInteractionId = cleanSarvamSentinel(att.interaction_id);
+      if (attInteractionId && attInteractionId !== interactionId) {
+        interactionId = attInteractionId;
+        callLog.interactionId = attInteractionId;
+        updated = true;
+      }
+
+      const attLang = resolveSarvamLanguageCode(att.language_name);
+      if (attLang && attLang !== actualLanguageUsed) {
+        actualLanguageUsed = attLang;
+        callLog.actualLanguageUsed = attLang;
+        callLog.languageStatus = computeLanguageVerificationStatus({
+          requestedLanguage: callLog.requestedLanguage || callLog.language,
+          actualLanguageUsed: attLang,
+          existingStatus: callLog.languageStatus,
+        });
+        updated = true;
+      }
+
+      const attRawStatus = cleanSarvamSentinel(att.connectivity_status)?.toLowerCase();
+      if (attRawStatus) {
+        callLog.providerStatusRaw = attRawStatus;
+        callLog.sarvamStatus = attRawStatus;
+        const parsedStart = parseSarvamUtcTimestamp(att.start_datetime);
+        const parsedEnd = parseSarvamUtcTimestamp(att.end_datetime || att.attempted_at);
+        if (parsedEnd) callLog.providerUpdatedAt = parsedEnd;
+
+        if (ACTIVE_CALL_STATUSES.includes(callLog.callStatus)) {
+          const evaluated = evaluateSarvamAgentOutcome(
+            {
+              attempt_id: callLog.attemptId,
+              status: attRawStatus,
+              connectivity_status: attRawStatus,
+              started_at: att.start_datetime,
+              ended_at: att.end_datetime,
+              ended_by: att.ended_by,
+              duration: att.duration_in_seconds,
+              interaction_id: interactionId,
+              failure_reason: att.failure_reason,
+              language_name: att.language_name,
+              final_agent_variables: att.agent_variables,
+              recording_url: att.audio_url,
+            },
+            member.fullName,
+            medicine.name,
+            {
+              recordingConsentGranted,
+              transcriptConsentGranted,
+            }
+          );
+
+          if (!evaluated.isIntermediateEvent && callLog.doseInstanceId && callLog.medicineId) {
+            callLog.webhookEvents = callLog.webhookEvents || [];
+            callLog.webhookEvents.push({
+              eventId: `reconcile:${attRawStatus}:${now.getTime()}`,
+              receivedAt: now,
+              source: 'ANALYTICS_API',
+              rawStatus: attRawStatus,
+              mappedStatus: evaluated.callStatus,
+              sanitizedPayload: {
+                interactionId,
+                durationSeconds: evaluated.durationSeconds,
+                failureReason: cleanSarvamSentinel(att.failure_reason),
+                endedBy: cleanSarvamSentinel(att.ended_by),
+                languageName: cleanSarvamSentinel(att.language_name),
+              },
+            });
+            await callLog.save();
+
+            const execResult: VoiceCallExecutionResult = {
+              provider: 'sarvam',
+              mode: 'live',
+              callStatus: evaluated.callStatus,
+              providerCallId: callLog.attemptId,
+              attemptId: callLog.attemptId,
+              interactionId,
+              sarvamStatus: attRawStatus,
+              providerStatusRaw: attRawStatus,
+              failureReason: cleanSarvamSentinel(att.failure_reason),
+              finalAgentVariables: transcriptConsentGranted ? att.agent_variables : undefined,
+              recordingUrl: recordingConsentGranted ? att.audio_url : undefined,
+              audioRecordingConsentGranted: recordingConsentGranted,
+              transcriptConsentGranted,
+              transcriptSource: 'ANALYTICS_API',
+              actualLanguageUsed: evaluated.actualLanguageUsed || actualLanguageUsed,
+              outcome: evaluated.outcome,
+              durationSeconds: evaluated.durationSeconds,
+              mealConfirmed: evaluated.mealConfirmed,
+              medicineConfirmed: evaluated.medicineConfirmed,
+              requestedCallbackDelayMinutes: evaluated.requestedCallbackDelayMinutes,
+              feelingUnwell: evaluated.feelingUnwell,
+              requestedHelp: evaluated.requestedHelp,
+              turns: evaluated.turns,
+              aiSummary: evaluated.aiSummary,
+              safetyFlags: evaluated.safetyFlags,
+            };
+
+            await applyCallResultToEntities({
+              callLogId: callLog._id as Types.ObjectId,
+              doseId: callLog.doseInstanceId,
+              familyId: callLog.familyId,
+              memberId: callLog.familyMemberId,
+              medicineId: callLog.medicineId,
+              medicineName: medicine.name,
+              dosage: medicine.dosage,
+              memberName: member.fullName,
+              languageCode: callLog.language,
+              recordingConsentGranted,
+              transcriptConsentGranted,
+              result: execResult,
+              statusSource: 'RECONCILIATION',
+              callbackId: callLog.callbackId,
+              startedAtOverride: parsedStart,
+              endedAtOverride: parsedEnd,
+            });
+            updated = true;
+          } else if (evaluated.isIntermediateEvent) {
+            const currentRank = ACTIVE_STAGE_RANK[callLog.callStatus] ?? -1;
+            const incomingRank = ACTIVE_STAGE_RANK[evaluated.callStatus] ?? 0;
+            if (incomingRank > currentRank) {
+              callLog.callStatus = evaluated.callStatus;
+              callLog.lastStatusUpdateAt = now;
+              callLog.statusHistory.push({
+                status: evaluated.callStatus,
+                timestamp: now,
+                source: 'RECONCILIATION',
+                note: `Sarvam Analytics reconciled intermediate status: ${attRawStatus}`,
+              });
+              updated = true;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Reload callLog in case applyCallResultToEntities saved changes
+  const latestLog = await CallLog.findOne({ _id: callLog._id, familyId: callLog.familyId });
+  if (!latestLog) return { reconciled: true, updated };
+  interactionId = latestLog.interactionId || interactionId;
+  actualLanguageUsed = latestLog.actualLanguageUsed || actualLanguageUsed;
+  recoveredVars = latestLog.finalAgentVariables || recoveredVars;
+
+  // 2) Fetch async Sarvam Analytics transcripts when transcript consent is GRANTED
+  const latestConv = await Conversation.findOne({
+    callLogId: latestLog._id,
+    familyId: latestLog.familyId,
+  });
+  const stillNeedsTranscript =
+    transcriptConsentGranted &&
+    latestLog.callStatus === 'COMPLETED' &&
+    (!latestConv || !latestConv.turns || latestConv.turns.length === 0);
+
+  if (stillNeedsTranscript || (latestLog.callStatus === 'COMPLETED' && (!actualLanguageUsed || !interactionId))) {
+    const interRes = await fetchSarvamInteraction({
+      attemptId: latestLog.attemptId,
+      interactionId,
+      referenceDate: latestLog.createdAt,
+    });
+
+    if (interRes.found && interRes.interaction) {
+      const inter = interRes.interaction;
+      if (inter.interaction_id && !latestLog.interactionId) {
+        interactionId = inter.interaction_id;
+        latestLog.interactionId = inter.interaction_id;
+        updated = true;
+      }
+      const interLang = resolveSarvamLanguageCode(inter.language_name);
+      if (interLang && !latestLog.actualLanguageUsed) {
+        actualLanguageUsed = interLang;
+        latestLog.actualLanguageUsed = interLang;
+        latestLog.languageStatus = computeLanguageVerificationStatus({
+          requestedLanguage: latestLog.requestedLanguage || latestLog.language,
+          actualLanguageUsed: interLang,
+          existingStatus: latestLog.languageStatus,
+        });
+        updated = true;
+      }
+      if (transcriptConsentGranted && inter.agent_variables && !recoveredVars) {
+        recoveredVars = inter.agent_variables;
+        latestLog.finalAgentVariables = inter.agent_variables;
+        updated = true;
+      }
+    }
+
+    if (transcriptConsentGranted && stillNeedsTranscript) {
+      const trRes = interactionId
+        ? await fetchSarvamTranscript(interactionId)
+        : { found: false, messages: [] };
+
+      const recoveredTurns = mapSarvamAnalyticsTranscripts({
+        originalTranscript: interRes.interaction?.original_transcript,
+        translateTranscript: interRes.interaction?.translate_transcript,
+        messages: trRes.messages,
+        defaultLanguage: actualLanguageUsed || latestLog.language,
+      });
+
+      if (recoveredTurns.length > 0) {
+        latestLog.transcriptAvailable = true;
+        latestLog.transcriptStatus = 'AVAILABLE';
+        latestLog.transcriptSource = 'ANALYTICS_API';
+        updated = true;
+
+        await Conversation.findOneAndUpdate(
+          { callLogId: latestLog._id, familyId: latestLog.familyId },
+          {
+            $set: {
+              ...(interactionId ? { interactionId } : {}),
+              ...(actualLanguageUsed ? { actualLanguageUsed } : {}),
+              transcriptSource: 'ANALYTICS_API',
+              turns: recoveredTurns.map((t) => ({
+                ...t,
+                timestamp: t.timestamp ?? new Date(),
+                language: t.language || actualLanguageUsed || latestLog.language,
+              })),
+              ...(recoveredVars ? { finalAgentVariables: recoveredVars } : {}),
+            },
+          },
+          { upsert: true, new: true }
+        );
+      } else if (
+        latestLog.endedAt &&
+        Date.now() - new Date(latestLog.endedAt).getTime() > 120_000 &&
+        latestLog.transcriptStatus === 'PENDING'
+      ) {
+        latestLog.transcriptStatus = 'UNAVAILABLE';
+        updated = true;
+      }
+    }
+  }
+
+  // 3) Probe Sarvam recording availability honestly when audio recording consent is GRANTED
+  if (
+    recordingConsentGranted &&
+    latestLog.callStatus === 'COMPLETED' &&
+    interactionId &&
+    (latestLog.recordingStatus === 'PROCESSING' || params.force)
+  ) {
+    const recProbe = await probeSarvamRecording(interactionId);
+    if (recProbe.status === 'AVAILABLE') {
+      latestLog.recordingStatus = 'AVAILABLE';
+      latestLog.recordingNote = 'Audio recording verified available on Sarvam Analytics.';
+      await Recording.findOneAndUpdate(
+        { callLogId: latestLog._id },
+        {
+          callLogId: latestLog._id,
+          familyId: latestLog.familyId,
+          familyMemberId: latestLog.familyMemberId,
+          provider: 'sarvam',
+          storageKey: `sarvam:${interactionId}`,
+          mimeType: recProbe.mimeType || 'audio/wav',
+          durationSeconds: latestLog.durationSeconds,
+          consentVerified: true,
+        },
+        { upsert: true, new: true }
+      );
+      updated = true;
+    } else if (recProbe.status === 'NOT_READY') {
+      const elapsedMs = latestLog.endedAt
+        ? Date.now() - new Date(latestLog.endedAt).getTime()
+        : 0;
+      if (params.force || elapsedMs > 90_000) {
+        latestLog.recordingStatus = 'UNAVAILABLE';
+        latestLog.recordingNote =
+          'Audio recording returned HTTP 404 on Sarvam Analytics. Vobiz/Sarvam call recording may not be enabled for this attempt.';
+      } else {
+        latestLog.recordingStatus = 'PROCESSING';
+        latestLog.recordingNote =
+          'Recording returned HTTP 404 (Sarvam Analytics has up to ~60s archival delay). Retry shortly.';
+      }
+      updated = true;
+    }
+  }
+
+  latestLog.lastReconciledAt = now;
+  await latestLog.save();
+
+  if (updated) {
+    await recordAudit({
+      familyId: latestLog.familyId,
+      actorType: 'SYSTEM',
+      actorId: latestLog.attemptId || String(latestLog._id),
+      action: 'SARVAM_CALL_RECONCILED',
+      resourceType: 'CallLog',
+      resourceId: String(latestLog._id),
+      metadata: {
+        callStatus: latestLog.callStatus,
+        transcriptStatus: latestLog.transcriptStatus,
+        recordingStatus: latestLog.recordingStatus,
+        actualLanguageUsed: latestLog.actualLanguageUsed ?? null,
+      },
+    });
+  }
+
+  return { reconciled: true, updated };
+}
+
+export async function reconcileSarvamCall(params: {
+  familyId: string;
+  callLogId: string;
+  force?: boolean;
+}) {
+  await reconcileSarvamCallInternal(params);
+  return getCallDetail(params.familyId, params.callLogId);
+}
+
+export async function getCallStatusSnapshot(
+  familyId: string,
+  callLogId: string,
+  options?: { reconcile?: boolean }
+) {
   if (!Types.ObjectId.isValid(callLogId)) {
     throw new ValidationError('Invalid callLogId');
+  }
+  if (options?.reconcile) {
+    await reconcileSarvamCallInternal({ familyId, callLogId }).catch(() => undefined);
   }
   const callLog = await CallLog.findOne({
     _id: new Types.ObjectId(callLogId),
     familyId: new Types.ObjectId(familyId),
   })
     .select(
-      '_id provider mode isMock isTestCall callType callPurpose callStatus outcome sarvamStatus attemptId interactionId failureReason startedAt ringingAt answeredAt endedAt durationSeconds mealConfirmed medicineConfirmed recordingStatus recordingConsentGranted transcriptAvailable statusHistory updatedAt'
+      '_id provider mode isMock isTestCall callType callPurpose callStatus outcome sarvamStatus providerStatusRaw attemptId interactionId failureReason queuedAt initiatingAt startedAt ringingAt answeredAt endedAt lastStatusUpdateAt lastReconciledAt providerUpdatedAt durationSeconds mealConfirmed medicineConfirmed recordingStatus recordingNote recordingConsentGranted audioRecordingConsentGranted transcriptConsentGranted transcriptAvailable transcriptStatus transcriptSource language requestedLanguage actualLanguageUsed fallbackLanguage languageStatus statusHistory webhookEvents updatedAt'
     )
     .lean();
 
@@ -1624,15 +2425,25 @@ export async function cancelActiveRealCall(input: {
   return getCallDetail(input.familyId, String(callLog._id));
 }
 
-export async function getCallDetail(familyId: string, callLogId: string) {
+export async function getCallDetail(
+  familyId: string,
+  callLogId: string,
+  options?: { reconcile?: boolean }
+) {
   if (!Types.ObjectId.isValid(callLogId)) {
     throw new ValidationError('Invalid callLogId');
+  }
+  if (options?.reconcile) {
+    await reconcileSarvamCallInternal({ familyId, callLogId }).catch(() => undefined);
   }
   const callLog = await CallLog.findOne({
     _id: new Types.ObjectId(callLogId),
     familyId: new Types.ObjectId(familyId),
   })
-    .populate('familyMemberId', 'fullName phoneNumber preferredLanguage timezone recordingConsentStatus')
+    .populate(
+      'familyMemberId',
+      'fullName phoneNumber preferredLanguage timezone recordingConsentStatus transcriptConsentStatus voiceCallingConsentStatus'
+    )
     .populate('medicineId', 'name dosage prescribedInstructions foodInstruction associatedMeal')
     .populate('doseInstanceId', 'slotLabel scheduledAt status mealStatus scheduledDateLocal')
     .lean();
@@ -1649,18 +2460,52 @@ export async function getCallDetail(familyId: string, callLogId: string) {
     Callback.find({ sourceCallLogId: callLog._id, familyId: callLog.familyId }).lean(),
   ]);
 
-  return {
-    callLog,
-    conversation,
-    recording: recording
+  const populatedMember = callLog.familyMemberId as unknown as {
+    transcriptConsentStatus?: string;
+    recordingConsentStatus?: string;
+  };
+  const transcriptAllowed =
+    callLog.transcriptConsentGranted !== false &&
+    (populatedMember?.transcriptConsentStatus ?? 'PENDING') === 'GRANTED';
+  const audioAllowed =
+    callLog.audioRecordingConsentGranted !== false &&
+    callLog.recordingConsentGranted !== false &&
+    populatedMember?.recordingConsentStatus === 'GRANTED';
+
+  const safeConversation =
+    conversation && !transcriptAllowed
       ? {
-          id: String(recording._id),
-          mimeType: recording.mimeType,
-          durationSeconds: recording.durationSeconds,
-          consentVerified: recording.consentVerified,
-          provider: recording.provider,
+          ...conversation,
+          turns: [],
+          finalAgentVariables: undefined,
+          aiSummary:
+            conversation.aiSummary ||
+            '[Conversation transcript withheld: patient CALL_TRANSCRIPT consent not granted]',
         }
-      : null,
+      : conversation;
+
+  const safeCallLog = !transcriptAllowed || !audioAllowed
+    ? {
+        ...callLog,
+        transcriptAvailable: transcriptAllowed ? callLog.transcriptAvailable : false,
+        transcriptStatus: transcriptAllowed ? callLog.transcriptStatus : 'CONSENT_DENIED',
+        recordingStatus: audioAllowed ? callLog.recordingStatus : 'CONSENT_DENIED',
+      }
+    : callLog;
+
+  return {
+    callLog: safeCallLog,
+    conversation: safeConversation,
+    recording:
+      recording && audioAllowed
+        ? {
+            id: String(recording._id),
+            mimeType: recording.mimeType,
+            durationSeconds: recording.durationSeconds,
+            consentVerified: recording.consentVerified,
+            provider: recording.provider,
+          }
+        : null,
     escalations,
     callbacks,
   };
@@ -1693,17 +2538,44 @@ export async function getAuthorizedRecordingAudio(
     familyId: callLog.familyId,
   }).lean();
 
+  const callLevelAudioConsent =
+    callLog.audioRecordingConsentGranted ?? callLog.recordingConsentGranted;
   if (
-    !callLog.recordingConsentGranted ||
+    !callLevelAudioConsent ||
     !member ||
     member.recordingConsentStatus !== 'GRANTED'
   ) {
-    throw new ForbiddenError('Recording access denied: patient recording consent is not GRANTED');
+    throw new ForbiddenError('Recording access denied: patient CALL_RECORDING consent is not GRANTED');
   }
+
+  const fetchFromSarvamOrUpdateNote = async (interactionId: string) => {
+    try {
+      return await fetchSarvamRecordingAudio(interactionId);
+    } catch (err) {
+      if (err instanceof AppError && err.code === 'RECORDING_NOT_READY') {
+        const elapsedMs = callLog.endedAt
+          ? Date.now() - new Date(callLog.endedAt).getTime()
+          : 0;
+        await CallLog.updateOne(
+          { _id: callLog._id },
+          {
+            $set: {
+              recordingStatus: elapsedMs > 90_000 ? 'UNAVAILABLE' : 'PROCESSING',
+              recordingNote:
+                elapsedMs > 90_000
+                  ? 'Audio recording returned HTTP 404 on Sarvam Analytics. Vobiz/Sarvam recording may be disabled or unavailable.'
+                  : 'Audio recording not yet available on Sarvam Analytics (HTTP 404). Retry after ~60s archival window.',
+            },
+          }
+        ).catch(() => undefined);
+      }
+      throw err;
+    }
+  };
 
   if (!recording) {
     if (callLog.provider === 'sarvam' && callLog.interactionId) {
-      const fetched = await fetchSarvamRecordingAudio(callLog.interactionId);
+      const fetched = await fetchFromSarvamOrUpdateNote(callLog.interactionId);
       return {
         mimeType: fetched.mimeType,
         audioBuffer: fetched.buffer,
@@ -1728,7 +2600,7 @@ export async function getAuthorizedRecordingAudio(
   }
 
   if (recording.provider === 'sarvam' && callLog.interactionId) {
-    const fetched = await fetchSarvamRecordingAudio(callLog.interactionId);
+    const fetched = await fetchFromSarvamOrUpdateNote(callLog.interactionId);
     return {
       mimeType: fetched.mimeType,
       audioBuffer: fetched.buffer,

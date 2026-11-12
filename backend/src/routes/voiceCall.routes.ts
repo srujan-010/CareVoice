@@ -19,6 +19,9 @@ const realTestCallSchema = z.object({
     }),
   }),
   overrideQuietHours: z.boolean().optional(),
+  requestedLanguage: z.string().trim().min(2).max(20).optional(),
+  fallbackLanguage: z.string().trim().min(2).max(20).optional(),
+  allowLanguageFallback: z.boolean().optional(),
 });
 
 const cancelCallSchema = z.object({
@@ -40,6 +43,8 @@ router.post(
   validateBody(cancelCallSchema),
   voiceCallController.cancelActiveCall
 );
+
+router.post('/:id/reconcile', voiceCallController.reconcileCall);
 
 router.get('/:id/status', voiceCallController.getCallStatus);
 

@@ -29,8 +29,9 @@ export interface IFamilyMember extends Document {
   relationship: string;
   emergencyContact: IEmergencyContact;
   callingPreferences: ICallingPreferences;
-  recordingConsentStatus: ConsentStatus;
   voiceCallingConsentStatus: ConsentStatus;
+  transcriptConsentStatus: ConsentStatus;
+  recordingConsentStatus: ConsentStatus;
   isActive: boolean;
   notes?: string;
   createdAt: Date;
@@ -70,15 +71,20 @@ const familyMemberSchema = new Schema<IFamilyMember>(
         default: 'FEMALE',
       },
     },
-    recordingConsentStatus: {
-      type: String,
-      enum: CONSENT_STATUSES,
-      default: 'PENDING',
-    },
     voiceCallingConsentStatus: {
       type: String,
       enum: CONSENT_STATUSES,
       default: 'GRANTED',
+    },
+    transcriptConsentStatus: {
+      type: String,
+      enum: CONSENT_STATUSES,
+      default: 'PENDING',
+    },
+    recordingConsentStatus: {
+      type: String,
+      enum: CONSENT_STATUSES,
+      default: 'PENDING',
     },
     isActive: { type: Boolean, default: true },
     notes: { type: String, trim: true, maxlength: 1000 },

@@ -6,11 +6,15 @@ import {
   ConsentStatus,
   ConsentType,
   DOSE_STATUSES,
+  normalizeConsentTypeInput,
 } from '../constants/statuses';
+import { CallLog } from '../models/CallLog';
 import { CallSchedule } from '../models/CallSchedule';
 import { Callback } from '../models/Callback';
 import { Consent } from '../models/Consent';
+import { Conversation } from '../models/Conversation';
 import { FamilyMember, ICallingPreferences, IEmergencyContact } from '../models/FamilyMember';
+import { Recording } from '../models/Recording';
 import { removeCallJob } from '../queues/queueManager';
 import { ConflictError, NotFoundError, ValidationError } from '../utils/errors';
 import { normalizeAndValidateE164 } from '../utils/phone';
@@ -27,6 +31,7 @@ export interface CreateFamilyMemberInput {
   emergencyContact: IEmergencyContact;
   callingPreferences?: Partial<ICallingPreferences>;
   recordingConsentStatus?: ConsentStatus;
+  transcriptConsentStatus?: ConsentStatus;
   voiceCallingConsentStatus?: ConsentStatus;
   isActive?: boolean;
   notes?: string;
@@ -69,6 +74,124 @@ async function cancelPendingMemberCallsAndCallbacks(
       },
     }
   );
+}
+
+/**
+ * Enforces CareVoice's strict Consent Revocation & Retention Policy:
+ * - Revoking/denying VOICE_CALLING cancels pending calls & callbacks.
+ * - Revoking/denying CALL_TRANSCRIPT purges stored verbatim turns and sensitive variables from Conversation & CallLog.
+ * - Revoking/denying CALL_RECORDING deletes stored Recording records & marks CallLogs CONSENT_DENIED.
+ */
+async function applyConsentRetentionPolicy(params: {
+  familyId: string;
+  memberId: Types.ObjectId;
+  consentType: ConsentType;
+  newStatus: ConsentStatus;
+  consentId?: Types.ObjectId;
+  actorUserId: string;
+  ipAddress?: string;
+}): Promise<void> {
+  const { familyId, memberId, consentType, newStatus, consentId, actorUserId, ipAddress } = params;
+  const familyObjId = new Types.ObjectId(familyId);
+
+  if (consentType === 'VOICE_CALLING' && newStatus !== 'GRANTED') {
+    await cancelPendingMemberCallsAndCallbacks(
+      familyId,
+      memberId,
+      `Voice calling consent ${newStatus.toLowerCase()}`
+    );
+    return;
+  }
+
+  if (newStatus !== 'REVOKED' && newStatus !== 'DENIED') {
+    return;
+  }
+
+  const now = new Date();
+
+  if (consentType === 'CALL_TRANSCRIPT') {
+    const convRes = await Conversation.updateMany(
+      { familyId: familyObjId, familyMemberId: memberId },
+      {
+        $set: {
+          turns: [],
+          aiSummary: `[Conversation transcript purged: CALL_TRANSCRIPT consent ${newStatus.toLowerCase()}]`,
+        },
+        $unset: {
+          finalAgentVariables: 1,
+        },
+        $addToSet: {
+          safetyFlags: 'TRANSCRIPT_DELETED_CONSENT_REVOKED',
+        },
+      }
+    );
+
+    await CallLog.updateMany(
+      { familyId: familyObjId, familyMemberId: memberId },
+      {
+        $set: {
+          transcriptConsentGranted: false,
+          transcriptAvailable: false,
+          transcriptStatus: 'CONSENT_DENIED',
+        },
+      }
+    );
+
+    if (consentId) {
+      await Consent.updateOne({ _id: consentId }, { $set: { retentionPolicyAppliedAt: now } });
+    }
+
+    await recordAudit({
+      familyId,
+      actorType: 'USER',
+      actorId: actorUserId,
+      action: 'CONSENT_RETENTION_TRANSCRIPT_PURGED',
+      resourceType: 'FamilyMember',
+      resourceId: String(memberId),
+      ipAddress,
+      metadata: {
+        consentType,
+        status: newStatus,
+        conversationsRedacted: convRes.modifiedCount,
+      },
+    });
+  } else if (consentType === 'CALL_RECORDING') {
+    const delRes = await Recording.deleteMany({
+      familyId: familyObjId,
+      familyMemberId: memberId,
+    });
+
+    await CallLog.updateMany(
+      { familyId: familyObjId, familyMemberId: memberId },
+      {
+        $set: {
+          recordingConsentGranted: false,
+          audioRecordingConsentGranted: false,
+          recordingStatus: 'CONSENT_DENIED',
+          recordingNote: `Audio recording deleted/withheld per CALL_RECORDING consent ${newStatus.toLowerCase()}.`,
+        },
+      }
+    );
+
+    if (consentId) {
+      await Consent.updateOne({ _id: consentId }, { $set: { retentionPolicyAppliedAt: now } });
+    }
+
+    await recordAudit({
+      familyId,
+      actorType: 'USER',
+      actorId: actorUserId,
+      action: 'CONSENT_RETENTION_RECORDING_PURGED',
+      resourceType: 'FamilyMember',
+      resourceId: String(memberId),
+      ipAddress,
+      metadata: {
+        consentType,
+        status: newStatus,
+        recordingsDeleted: delRes.deletedCount,
+      },
+    });
+  }
 }
 
 export async function listFamilyMembers(
@@ -136,6 +259,7 @@ export async function createFamilyMember(
   }
 
   const recordingConsent: ConsentStatus = input.recordingConsentStatus ?? 'PENDING';
+  const transcriptConsent: ConsentStatus = input.transcriptConsentStatus ?? 'PENDING';
   const callingConsent: ConsentStatus = input.voiceCallingConsentStatus ?? 'GRANTED';
 
   const member = await withOptionalTransaction(async (session) => {
@@ -165,6 +289,7 @@ export async function createFamilyMember(
             preferredVoiceGender: input.callingPreferences?.preferredVoiceGender ?? 'FEMALE',
           },
           recordingConsentStatus: recordingConsent,
+          transcriptConsentStatus: transcriptConsent,
           voiceCallingConsentStatus: callingConsent,
           isActive: input.isActive ?? true,
           notes: input.notes?.trim(),
@@ -173,20 +298,29 @@ export async function createFamilyMember(
       session ? { session } : undefined
     );
 
-    const consentDocs = CONSENT_TYPES.map((consentType) => ({
-      familyId: new Types.ObjectId(familyId),
-      familyMemberId: created._id,
-      consentType,
-      status:
+    const now = new Date();
+    const consentDocs = CONSENT_TYPES.map((consentType) => {
+      const status: ConsentStatus =
         consentType === 'CALL_RECORDING'
           ? recordingConsent
-          : consentType === 'VOICE_CALLING'
-            ? callingConsent
-            : 'PENDING',
-      grantedByUserId: new Types.ObjectId(actorUserId),
-      grantedByName: actorName,
-      method: 'DASHBOARD' as const,
-    }));
+          : consentType === 'CALL_TRANSCRIPT'
+            ? transcriptConsent
+            : consentType === 'VOICE_CALLING'
+              ? callingConsent
+              : 'PENDING';
+      return {
+        familyId: new Types.ObjectId(familyId),
+        familyMemberId: created._id,
+        consentType,
+        status,
+        consentVersion: 'v1.0',
+        grantedAt: status === 'GRANTED' ? now : undefined,
+        revokedAt: status === 'REVOKED' || status === 'DENIED' ? now : undefined,
+        grantedByUserId: new Types.ObjectId(actorUserId),
+        grantedByName: actorName,
+        method: 'DASHBOARD' as const,
+      };
+    });
 
     await Consent.insertMany(consentDocs, session ? { session } : {});
     return created;
@@ -224,10 +358,25 @@ export async function getFamilyMemberById(familyId: string, memberId: string) {
     familyMemberId: member._id,
   }).lean();
 
+  const consentTypesPresent = new Set(consents.map((c) => c.consentType));
+  const normalizedConsents = [...consents];
+  if (!consentTypesPresent.has('CALL_TRANSCRIPT')) {
+    normalizedConsents.push({
+      _id: member._id,
+      familyId: member.familyId,
+      familyMemberId: member._id,
+      consentType: 'CALL_TRANSCRIPT',
+      status: member.transcriptConsentStatus ?? 'PENDING',
+      consentVersion: 'v1.0',
+      method: 'DASHBOARD',
+    } as never);
+  }
+
   return {
     ...member,
+    transcriptConsentStatus: member.transcriptConsentStatus ?? 'PENDING',
     id: String(member._id),
-    consents,
+    consents: normalizedConsents,
   };
 }
 
@@ -366,18 +515,63 @@ export async function updateFamilyMember(
     };
   }
 
+  const consentNow = new Date();
+
   if (input.recordingConsentStatus) {
     member.recordingConsentStatus = input.recordingConsentStatus;
-    await Consent.findOneAndUpdate(
+    const recConsent = await Consent.findOneAndUpdate(
       { familyMemberId: member._id, consentType: 'CALL_RECORDING' },
       {
         status: input.recordingConsentStatus,
+        consentVersion: 'v1.0',
+        ...(input.recordingConsentStatus === 'GRANTED' ? { grantedAt: consentNow } : {}),
+        ...(input.recordingConsentStatus === 'REVOKED' || input.recordingConsentStatus === 'DENIED'
+          ? { revokedAt: consentNow }
+          : {}),
         grantedByUserId: new Types.ObjectId(actorUserId),
         grantedByName: actorName,
         method: 'DASHBOARD',
       },
-      { upsert: true }
+      { upsert: true, new: true }
     );
+    await applyConsentRetentionPolicy({
+      familyId,
+      memberId: member._id as Types.ObjectId,
+      consentType: 'CALL_RECORDING',
+      newStatus: input.recordingConsentStatus,
+      consentId: recConsent?._id as Types.ObjectId | undefined,
+      actorUserId,
+      ipAddress,
+    });
+  }
+
+  if (input.transcriptConsentStatus) {
+    member.transcriptConsentStatus = input.transcriptConsentStatus;
+    const transConsent = await Consent.findOneAndUpdate(
+      { familyMemberId: member._id, consentType: 'CALL_TRANSCRIPT' },
+      {
+        status: input.transcriptConsentStatus,
+        consentVersion: 'v1.0',
+        ...(input.transcriptConsentStatus === 'GRANTED' ? { grantedAt: consentNow } : {}),
+        ...(input.transcriptConsentStatus === 'REVOKED' ||
+        input.transcriptConsentStatus === 'DENIED'
+          ? { revokedAt: consentNow }
+          : {}),
+        grantedByUserId: new Types.ObjectId(actorUserId),
+        grantedByName: actorName,
+        method: 'DASHBOARD',
+      },
+      { upsert: true, new: true }
+    );
+    await applyConsentRetentionPolicy({
+      familyId,
+      memberId: member._id as Types.ObjectId,
+      consentType: 'CALL_TRANSCRIPT',
+      newStatus: input.transcriptConsentStatus,
+      consentId: transConsent?._id as Types.ObjectId | undefined,
+      actorUserId,
+      ipAddress,
+    });
   }
 
   if (input.voiceCallingConsentStatus) {
@@ -386,6 +580,12 @@ export async function updateFamilyMember(
       { familyMemberId: member._id, consentType: 'VOICE_CALLING' },
       {
         status: input.voiceCallingConsentStatus,
+        consentVersion: 'v1.0',
+        ...(input.voiceCallingConsentStatus === 'GRANTED' ? { grantedAt: consentNow } : {}),
+        ...(input.voiceCallingConsentStatus === 'REVOKED' ||
+        input.voiceCallingConsentStatus === 'DENIED'
+          ? { revokedAt: consentNow }
+          : {}),
         grantedByUserId: new Types.ObjectId(actorUserId),
         grantedByName: actorName,
         method: 'DASHBOARD',
@@ -432,26 +632,37 @@ export async function updateMemberConsent(
   actorUserId: string,
   actorName: string,
   payload: {
-    consentType: ConsentType;
+    consentType: ConsentType | string;
     status: ConsentStatus;
     method?: 'DASHBOARD' | 'VERBAL_CALL' | 'WRITTEN';
     notes?: string;
-  }
+    consentVersion?: string;
+  },
+  ipAddress?: string
 ) {
+  const normalizedConsentType = normalizeConsentTypeInput(String(payload.consentType));
+  if (!normalizedConsentType) {
+    throw new ValidationError(`Unsupported consentType: ${payload.consentType}`);
+  }
+
   const member = await FamilyMember.findOne({
     _id: new Types.ObjectId(memberId),
     familyId: new Types.ObjectId(familyId),
   });
   if (!member) throw new NotFoundError('Family member');
 
+  const now = new Date();
   const consent = await Consent.findOneAndUpdate(
     {
       familyId: new Types.ObjectId(familyId),
       familyMemberId: member._id,
-      consentType: payload.consentType,
+      consentType: normalizedConsentType,
     },
     {
       status: payload.status,
+      consentVersion: payload.consentVersion || 'v1.0',
+      ...(payload.status === 'GRANTED' ? { grantedAt: now } : {}),
+      ...(payload.status === 'REVOKED' || payload.status === 'DENIED' ? { revokedAt: now } : {}),
       grantedByUserId: new Types.ObjectId(actorUserId),
       grantedByName: actorName,
       method: payload.method ?? 'DASHBOARD',
@@ -460,20 +671,26 @@ export async function updateMemberConsent(
     { upsert: true, new: true }
   );
 
-  if (payload.consentType === 'CALL_RECORDING') {
+  if (normalizedConsentType === 'CALL_RECORDING') {
     member.recordingConsentStatus = payload.status;
     await member.save();
-  } else if (payload.consentType === 'VOICE_CALLING') {
+  } else if (normalizedConsentType === 'CALL_TRANSCRIPT') {
+    member.transcriptConsentStatus = payload.status;
+    await member.save();
+  } else if (normalizedConsentType === 'VOICE_CALLING') {
     member.voiceCallingConsentStatus = payload.status;
     await member.save();
-    if (payload.status !== 'GRANTED') {
-      await cancelPendingMemberCallsAndCallbacks(
-        familyId,
-        member._id as Types.ObjectId,
-        `Voice calling consent ${payload.status.toLowerCase()}`
-      );
-    }
   }
+
+  await applyConsentRetentionPolicy({
+    familyId,
+    memberId: member._id as Types.ObjectId,
+    consentType: normalizedConsentType,
+    newStatus: payload.status,
+    consentId: consent._id as Types.ObjectId,
+    actorUserId,
+    ipAddress,
+  });
 
   await recordAudit({
     familyId,
@@ -482,7 +699,12 @@ export async function updateMemberConsent(
     action: 'MEMBER_CONSENT_UPDATED',
     resourceType: 'Consent',
     resourceId: String(consent._id),
-    metadata: { consentType: payload.consentType, status: payload.status },
+    ipAddress,
+    metadata: {
+      consentType: normalizedConsentType,
+      status: payload.status,
+      consentVersion: consent.consentVersion,
+    },
   });
 
   return consent;

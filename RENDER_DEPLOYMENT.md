@@ -76,7 +76,7 @@ This guide covers deploying the CareVoice Node/Express backend to **Render** usi
 - [ ] `VOICE_PROVIDER_MODE` — Keep `"mock"` on initial deploy; set `"sarvam"` only at go-live
 - [ ] `TELEPHONY_ENABLED` — Keep `"false"` on initial deploy; set `"true"` only at go-live
 - [ ] `SARVAM_API_BASE_URL=https://apps.sarvam.ai`
-- [ ] `SARVAM_API_KEY` — Sarvam AI API Key (`X-API-Key`)
+- [ ] `SARVAM_API_KEY` — Sarvam **Voice Agents Workspace API Key** generated in `https://apps.sarvam.ai` (**Settings -> API Key** inside your workspace, sent as `X-API-Key`; do **NOT** use a `dashboard.sarvam.ai` Core Model API subscription key, and store without quotes or spaces)
 - [ ] `SARVAM_ORG_ID` — Sarvam Organization UUID
 - [ ] `SARVAM_WORKSPACE_ID` — Sarvam Workspace UUID
 - [ ] `SARVAM_AGENT_ID` — Sarvam Voice Agent App ID (`app_config.app_id`)

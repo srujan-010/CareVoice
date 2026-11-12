@@ -11,8 +11,12 @@ export interface IConsent extends Document {
   familyMemberId: Types.ObjectId;
   consentType: ConsentType;
   status: ConsentStatus;
+  consentVersion: string;
   grantedByUserId?: Types.ObjectId;
   grantedByName?: string;
+  grantedAt?: Date;
+  revokedAt?: Date;
+  retentionPolicyAppliedAt?: Date;
   method: 'DASHBOARD' | 'VERBAL_CALL' | 'WRITTEN';
   notes?: string;
   createdAt: Date;
@@ -30,8 +34,12 @@ const consentSchema = new Schema<IConsent>(
     },
     consentType: { type: String, enum: CONSENT_TYPES, required: true },
     status: { type: String, enum: CONSENT_STATUSES, required: true, default: 'PENDING' },
+    consentVersion: { type: String, trim: true, default: 'v1.0' },
     grantedByUserId: { type: Schema.Types.ObjectId, ref: 'User' },
     grantedByName: { type: String, trim: true },
+    grantedAt: { type: Date },
+    revokedAt: { type: Date },
+    retentionPolicyAppliedAt: { type: Date },
     method: {
       type: String,
       enum: ['DASHBOARD', 'VERBAL_CALL', 'WRITTEN'],

@@ -23,11 +23,18 @@ import {
 } from '@/components/ui/dialog';
 import { Input, SelectNative } from '@/components/ui/input';
 import { ApiClientError, apiRequest } from '@/lib/api';
-import { getLanguageLabel } from '@/lib/constants';
+import {
+  getCallLifecycleBadgeVariant,
+  getLanguageLabel,
+  SUPPORTED_LANGUAGES,
+} from '@/lib/constants';
+import { formatDateTimeInTz } from '@/lib/utils';
 import type {
   CallLifecycleStatus,
   CallType,
   FamilyMember,
+  LanguageStatus,
+  TranscriptStatus,
   VoiceCallPreflight,
 } from '@/types';
 
@@ -49,9 +56,15 @@ interface RealTestCallResponse {
     outcome: string;
     attemptId?: string;
     sarvamStatus?: string;
+    providerStatusRaw?: string;
     recordingConsentGranted: boolean;
+    audioRecordingConsentGranted?: boolean;
+    transcriptConsentGranted?: boolean;
     phoneNumber: string;
     language: string;
+    requestedLanguage?: string;
+    fallbackLanguage?: string;
+    languageStatus?: LanguageStatus;
     failureReason?: string;
   };
   providerResponse: {
@@ -68,14 +81,34 @@ interface CallStatusSnapshot {
   callStatus: CallLifecycleStatus;
   outcome: string;
   sarvamStatus?: string;
+  providerStatusRaw?: string;
   attemptId?: string;
   interactionId?: string;
   failureReason?: string;
+  queuedAt?: string;
+  initiatingAt?: string;
+  startedAt?: string;
+  ringingAt?: string;
+  answeredAt?: string;
+  endedAt?: string;
+  lastStatusUpdateAt?: string;
+  lastReconciledAt?: string;
+  providerUpdatedAt?: string;
   durationSeconds: number;
   mealConfirmed: boolean | null;
   medicineConfirmed: string;
   recordingStatus: string;
+  recordingNote?: string;
   recordingConsentGranted: boolean;
+  audioRecordingConsentGranted?: boolean;
+  transcriptConsentGranted?: boolean;
+  transcriptAvailable?: boolean;
+  transcriptStatus?: TranscriptStatus;
+  language?: string;
+  requestedLanguage?: string;
+  actualLanguageUsed?: string;
+  fallbackLanguage?: string;
+  languageStatus?: LanguageStatus;
   statusHistory?: Array<{
     status: CallLifecycleStatus;
     timestamp: string;
@@ -90,13 +123,17 @@ const TERMINAL_CALL_STATUSES: CallLifecycleStatus[] = [
   'NO_ANSWER',
   'BUSY',
   'REJECTED',
+  'NOT_CONNECTED',
   'CANCELLED',
+  'LANGUAGE_UNAVAILABLE',
+  'LANGUAGE_FALLBACK_REQUIRED',
 ];
 
 const LIFECYCLE_STEPS: CallLifecycleStatus[] = [
   'QUEUED',
   'INITIATING',
   'RINGING',
+  'ANSWERED',
   'IN_PROGRESS',
   'COMPLETED',
 ];
@@ -128,8 +165,15 @@ export function RealTestCallDialog({
 
   const [submitting, setSubmitting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [syncingStatus, setSyncingStatus] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [failedCallLogId, setFailedCallLogId] = useState<string | null>(null);
+  const [fallbackRequiredInfo, setFallbackRequiredInfo] = useState<{
+    requestedLanguage: string;
+    availableFallbackLanguages: string[];
+  } | null>(null);
+  const [allowLanguageFallback, setAllowLanguageFallback] = useState(false);
+  const [fallbackLanguage, setFallbackLanguage] = useState('en');
 
   const [activeCall, setActiveCall] = useState<CallStatusSnapshot | null>(null);
   const [providerAcceptInfo, setProviderAcceptInfo] = useState<
@@ -167,6 +211,9 @@ export function RealTestCallDialog({
       setProviderAcceptInfo(null);
       setConfirmedByAdmin(false);
       setFailedCallLogId(null);
+      setFallbackRequiredInfo(null);
+      setAllowLanguageFallback(false);
+      setFallbackLanguage('en');
       setError(null);
       return;
     }
@@ -178,6 +225,16 @@ export function RealTestCallDialog({
     () => members.find((m) => m.id === familyMemberId) ?? null,
     [members, familyMemberId]
   );
+
+  const selectedLangOption = useMemo(
+    () => SUPPORTED_LANGUAGES.find((l) => l.code === selectedMember?.preferredLanguage) ?? null,
+    [selectedMember?.preferredLanguage]
+  );
+
+  useEffect(() => {
+    setFallbackRequiredInfo(null);
+    setAllowLanguageFallback(false);
+  }, [familyMemberId]);
 
   const memberDoses = useMemo(() => {
     if (!familyMemberId) return doses;
@@ -197,7 +254,7 @@ export function RealTestCallDialog({
     }
   }, [memberDoses, doseInstanceId]);
 
-  // Live poll GET /api/voice-calls/:id/status until terminal state
+  // Live poll GET /api/voice-calls/:id/status?reconcile=true until terminal state
   useEffect(() => {
     if (!open || !activeCall) return;
     if (TERMINAL_CALL_STATUSES.includes(activeCall.callStatus)) return;
@@ -205,7 +262,7 @@ export function RealTestCallDialog({
     const timer = setInterval(async () => {
       try {
         const snapshot = await apiRequest<CallStatusSnapshot>(
-          `/voice-calls/${activeCall._id}/status`
+          `/voice-calls/${activeCall._id}/status?reconcile=true`
         );
         setActiveCall(snapshot);
         if (TERMINAL_CALL_STATUSES.includes(snapshot.callStatus)) {
@@ -214,7 +271,7 @@ export function RealTestCallDialog({
       } catch {
         // Keep polling gently unless modal closes
       }
-    }, 2500);
+    }, 4000);
 
     return () => clearInterval(timer);
   }, [open, activeCall, onCallStartedOrUpdated]);
@@ -250,8 +307,7 @@ export function RealTestCallDialog({
   }, [selectedMember, callType]);
 
   const systemBlocked =
-    !preflight?.liveCallingAllowed ||
-    (preflight?.deploymentCheck ? !preflight.deploymentCheck.verified : false);
+    !preflight?.liveCallingAllowed || !preflight?.deploymentCheck?.verified;
 
   const canSubmit =
     !submitting &&
@@ -260,7 +316,8 @@ export function RealTestCallDialog({
     !permissionBlockedReason &&
     Boolean(familyMemberId) &&
     Boolean(doseInstanceId) &&
-    confirmedByAdmin;
+    confirmedByAdmin &&
+    (!fallbackRequiredInfo || (allowLanguageFallback && Boolean(fallbackLanguage)));
 
   const handlePlaceRealCall = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -277,14 +334,19 @@ export function RealTestCallDialog({
           purpose: purpose.trim() || undefined,
           overrideQuietHours,
           confirmedByAdmin: true,
+          ...(allowLanguageFallback
+            ? { allowLanguageFallback: true, fallbackLanguage }
+            : {}),
         }),
       });
+      setFallbackRequiredInfo(null);
       setProviderAcceptInfo(res.providerResponse);
       setActiveCall({
         _id: res.callLog._id,
         callStatus: res.callLog.callStatus,
         outcome: res.callLog.outcome,
         sarvamStatus: res.callLog.sarvamStatus,
+        providerStatusRaw: res.callLog.providerStatusRaw ?? res.callLog.sarvamStatus,
         attemptId: res.callLog.attemptId,
         failureReason: res.callLog.failureReason,
         durationSeconds: 0,
@@ -292,21 +354,67 @@ export function RealTestCallDialog({
         medicineConfirmed: 'UNCONFIRMED',
         recordingStatus: res.callLog.recordingConsentGranted ? 'PROCESSING' : 'CONSENT_DENIED',
         recordingConsentGranted: res.callLog.recordingConsentGranted,
+        audioRecordingConsentGranted:
+          res.callLog.audioRecordingConsentGranted ?? res.callLog.recordingConsentGranted,
+        transcriptConsentGranted: res.callLog.transcriptConsentGranted,
+        language: res.callLog.language,
+        requestedLanguage: res.callLog.requestedLanguage,
+        fallbackLanguage: res.callLog.fallbackLanguage,
+        languageStatus: res.callLog.languageStatus,
       });
       onCallStartedOrUpdated(res.callLog._id);
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError(err.message);
-        const maybeDetails = err.details as { callLogId?: string } | undefined;
+        const maybeDetails = err.details as
+          | {
+              callLogId?: string;
+              requestedLanguage?: string;
+              availableFallbackLanguages?: string[];
+              requiresFallbackPermission?: boolean;
+            }
+          | undefined;
         if (maybeDetails?.callLogId) {
           setFailedCallLogId(maybeDetails.callLogId);
           onCallStartedOrUpdated(maybeDetails.callLogId);
+        }
+        if (err.code === 'LANGUAGE_FALLBACK_REQUIRED' && maybeDetails?.requiresFallbackPermission) {
+          const allowedList = maybeDetails.availableFallbackLanguages ?? ['en', 'te', 'hi'];
+          setFallbackRequiredInfo({
+            requestedLanguage:
+              maybeDetails.requestedLanguage || selectedMember?.preferredLanguage || 'unknown',
+            availableFallbackLanguages: allowedList,
+          });
+          if (!allowedList.includes(fallbackLanguage) && allowedList.length > 0) {
+            setFallbackLanguage(allowedList[0]);
+          }
         }
       } else {
         setError('Failed to place real Sarvam outbound call.');
       }
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleSyncStatus = async () => {
+    if (!activeCall) return;
+    setSyncingStatus(true);
+    try {
+      const detailRes = await apiRequest<{ callLog: CallStatusSnapshot }>(
+        `/voice-calls/${activeCall._id}/reconcile`,
+        { method: 'POST' }
+      );
+      if (detailRes?.callLog) {
+        setActiveCall(detailRes.callLog);
+        onCallStartedOrUpdated(detailRes.callLog._id);
+      }
+    } catch (err) {
+      setError(
+        err instanceof ApiClientError ? err.message : 'Unable to sync call status from Sarvam.'
+      );
+    } finally {
+      setSyncingStatus(false);
     }
   };
 
@@ -390,20 +498,202 @@ export function RealTestCallDialog({
 
               {preflight.deploymentCheck ? (
                 <div
-                  className={`rounded-xl border px-3 py-2 text-xs ${
+                  className={`rounded-xl border px-3 py-2.5 text-xs space-y-1.5 ${
                     preflight.deploymentCheck.verified
                       ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
                       : 'border-rose-200 bg-rose-50 text-rose-800'
                   }`}
                 >
-                  <p className="font-bold">
-                    Sarvam Deployment Status ({preflight.deploymentCheck.status.toUpperCase()}):
-                  </p>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="font-bold">
+                      Sarvam Preflight Status ({preflight.deploymentCheck.status.toUpperCase()}
+                      {preflight.deploymentCheck.upstreamStatus
+                        ? ` • HTTP ${preflight.deploymentCheck.upstreamStatus}`
+                        : ''}
+                      ):
+                    </p>
+                    {preflight.deploymentCheck.authCategory &&
+                    preflight.deploymentCheck.authCategory !== 'VERIFIED' ? (
+                      <Badge variant="danger">
+                        {preflight.deploymentCheck.authCategory.replace(/_/g, ' ')}
+                      </Badge>
+                    ) : null}
+                  </div>
                   <p>{preflight.deploymentCheck.message}</p>
+                  {preflight.deploymentCheck.diagnosticHint ? (
+                    <p className="rounded-lg border border-rose-200/80 bg-white/80 px-2.5 py-1.5 text-[11px] text-rose-900">
+                      <strong>Fix Action:</strong> {preflight.deploymentCheck.diagnosticHint}
+                    </p>
+                  ) : null}
+                  {preflight.deploymentCheck.credentialsSharedWithOutbound ? (
+                    <p className="text-[11px] opacity-85">
+                      Auth header: <code>{preflight.deploymentCheck.authHeader || 'X-API-Key'}</code>{' '}
+                      (read-only GET verification with same workspace credentials used by Sarvam
+                      Outbound API; live dialing stays locked until verified).
+                    </p>
+                  ) : null}
+
+                  {preflight.deploymentCheck.workspaceDiscovery ? (
+                    <div className="mt-2 rounded-xl border border-sky-200 bg-white/95 p-3 text-[11px] text-slate-700 space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-bold text-slate-900">
+                          Read-Only Workspace Discovery (No Outbound Dialing / No Logs Viewer)
+                        </span>
+                        <Badge variant="neutral">
+                          {preflight.deploymentCheck.workspaceDiscovery.discoveredApps.length} App(s) Found
+                        </Badge>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px] bg-sky-50/60 border border-sky-100 rounded-lg p-2">
+                        <p>
+                          <span className="text-slate-500">Org ID:</span>{' '}
+                          <code className="font-mono text-slate-900">
+                            {preflight.deploymentCheck.workspaceDiscovery.orgId}
+                          </code>
+                        </p>
+                        <p>
+                          <span className="text-slate-500">Workspace ID:</span>{' '}
+                          <code className="font-mono text-slate-900">
+                            {preflight.deploymentCheck.workspaceDiscovery.workspaceId}
+                          </code>
+                        </p>
+                        <p>
+                          <span className="text-slate-500">Configured App ID:</span>{' '}
+                          <code className="font-mono text-slate-900">
+                            {preflight.deploymentCheck.workspaceDiscovery.configuredAgentId}
+                          </code>
+                        </p>
+                        <p>
+                          <span className="text-slate-500">Expected Version / Caller:</span>{' '}
+                          <code className="font-mono text-slate-900">
+                            v{preflight.deploymentCheck.workspaceDiscovery.configuredAgentVersion} •{' '}
+                            {preflight.deploymentCheck.workspaceDiscovery.configuredPhoneMasked}
+                          </code>
+                        </p>
+                        <p className="sm:col-span-2">
+                          <span className="text-slate-500">Configured Connection ID:</span>{' '}
+                          <code className="font-mono text-slate-900">
+                            {preflight.deploymentCheck.workspaceDiscovery.configuredConnectionId}
+                          </code>
+                        </p>
+                        <p className="sm:col-span-2">
+                          <span className="text-slate-500">Analytics Interactions Probe:</span>{' '}
+                          <span className="font-semibold text-slate-900">
+                            {preflight.deploymentCheck.workspaceDiscovery.analyticsAppCheckStatus
+                              ? `HTTP ${preflight.deploymentCheck.workspaceDiscovery.analyticsAppCheckStatus}`
+                              : 'Not reached'}
+                          </span>
+                          {preflight.deploymentCheck.workspaceDiscovery.analyticsAppCheckDetail
+                            ? ` — ${preflight.deploymentCheck.workspaceDiscovery.analyticsAppCheckDetail}`
+                            : ''}
+                        </p>
+                      </div>
+
+                      {preflight.deploymentCheck.workspaceDiscovery.discoveredApps.length > 0 ? (
+                        <div className="space-y-1.5">
+                          <p className="font-semibold text-slate-800">
+                            Discovered Agents in This Workspace:
+                          </p>
+                          {preflight.deploymentCheck.workspaceDiscovery.discoveredApps.map((appItem) => (
+                            <div
+                              key={appItem.appId}
+                              className="rounded-lg border border-sky-100 bg-sky-50/40 px-2.5 py-2 space-y-1"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-1.5">
+                                <code className="font-mono font-bold text-slate-900">
+                                  {appItem.appId}
+                                </code>
+                                <div className="flex flex-wrap gap-1">
+                                  <Badge
+                                    variant={appItem.matchesConfiguredAppId ? 'success' : 'warning'}
+                                  >
+                                    {appItem.matchesConfiguredAppId
+                                      ? 'Matches Configured App ID'
+                                      : 'Different App ID Found'}
+                                  </Badge>
+                                  {appItem.sources.map((src) => (
+                                    <Badge key={src} variant="neutral">
+                                      {src}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              </div>
+                              <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-600">
+                                <span>
+                                  Versions:{' '}
+                                  <strong>
+                                    {appItem.versions.length > 0
+                                      ? appItem.versions.map((v) => `v${v}`).join(', ')
+                                      : 'None surfaced'}
+                                  </strong>
+                                </span>
+                                {appItem.statuses.length > 0 ? (
+                                  <span>
+                                    Status: <strong>{appItem.statuses.join(', ')}</strong>
+                                  </span>
+                                ) : null}
+                                {appItem.connectionIds.length > 0 ? (
+                                  <span>
+                                    Connections:{' '}
+                                    <code className="font-mono">
+                                      {appItem.connectionIds.join(', ')}
+                                    </code>
+                                  </span>
+                                ) : null}
+                                {appItem.phoneNumbersMasked.length > 0 ? (
+                                  <span>
+                                    Phones:{' '}
+                                    <strong>{appItem.phoneNumbersMasked.join(', ')}</strong>
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50/80 px-2.5 py-2 text-amber-900">
+                          No existing Deployments, Campaigns, Experiments, or Test Suites surfaced any{' '}
+                          <code>app_id</code> under this Org/Workspace. Open the agent in{' '}
+                          <strong>apps.sarvam.ai</strong>, verify the Org & Workspace IDs match the
+                          workspace URL, commit a non-Draft version, copy the exact ID from{' '}
+                          <code>··· → Copy agent ID</code>, and link it to a Deployment or Campaign.
+                        </div>
+                      )}
+
+                      {preflight.deploymentCheck.workspaceDiscovery.discoveredConnections.length > 0 ? (
+                        <div className="space-y-1">
+                          <p className="font-semibold text-slate-800">
+                            Discovered Telephony Connections:
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {preflight.deploymentCheck.workspaceDiscovery.discoveredConnections.map(
+                              (conn) => (
+                                <div
+                                  key={`${conn.source}-${conn.connectionId}`}
+                                  className="rounded-md border border-sky-100 bg-white px-2 py-1 text-[10px]"
+                                >
+                                  <code className="font-mono text-slate-900">
+                                    {conn.connectionId}
+                                  </code>{' '}
+                                  ({conn.source}
+                                  {conn.phoneNumbersMasked.length > 0
+                                    ? ` • ${conn.phoneNumbersMasked.join(', ')}`
+                                    : ''}
+                                  )
+                                </div>
+                              )
+                            )}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 
-              {!preflight.liveCallingAllowed ? (
+              {!preflight.liveCallingAllowed &&
+              (preflight.missingTelephonyFields.length > 0 ||
+                preflight.missingWebhookFields.length > 0) ? (
                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
                   <p className="font-bold">Real calling is currently locked on backend:</p>
                   <p>
@@ -467,25 +757,25 @@ export function RealTestCallDialog({
                   </p>
                 ) : null}
               </div>
-              <Badge
-                variant={
-                  activeCall.callStatus === 'COMPLETED'
-                    ? 'success'
-                    : activeCall.callStatus === 'FAILED' || activeCall.callStatus === 'REJECTED'
-                      ? 'danger'
-                      : activeCall.callStatus === 'NO_ANSWER' ||
-                          activeCall.callStatus === 'BUSY' ||
-                          activeCall.callStatus === 'CANCELLED'
-                        ? 'warning'
-                        : 'indigo'
-                }
-              >
-                {activeCall.callStatus}
-              </Badge>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleSyncStatus}
+                  disabled={syncingStatus}
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${syncingStatus ? 'animate-spin' : ''}`} />
+                  Sync Status Now
+                </Button>
+                <Badge variant={getCallLifecycleBadgeVariant(activeCall.callStatus)}>
+                  {activeCall.callStatus}
+                </Badge>
+              </div>
             </div>
 
             {/* Lifecycle Step Bar */}
-            <div className="grid grid-cols-5 gap-1.5 text-center">
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 text-center">
               {LIFECYCLE_STEPS.map((step) => {
                 const currentIdx = LIFECYCLE_STEPS.indexOf(activeCall.callStatus);
                 const stepIdx = LIFECYCLE_STEPS.indexOf(step);
@@ -505,24 +795,70 @@ export function RealTestCallDialog({
               })}
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-              <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
-                <p className="text-slate-500">Provider Status</p>
-                <p className="font-bold text-slate-800">{activeCall.sarvamStatus || 'initiating'}</p>
+            {isTerminal && activeCall.callStatus !== 'COMPLETED' ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50/80 px-3 py-2 text-xs text-amber-900">
+                <strong>Terminal Call Outcome:</strong> {activeCall.callStatus} (Provider:{' '}
+                {activeCall.sarvamStatus || activeCall.providerStatusRaw || 'unknown'}) — Dose remains{' '}
+                <strong>{activeCall.medicineConfirmed}</strong>.
               </div>
+            ) : !isTerminal ? (
+              <p className="rounded-xl border border-sky-100 bg-sky-50/50 px-3 py-2 text-[11px] text-slate-600">
+                Sarvam Instant Outbound sends its post-call webhook once the call finishes or fails to
+                connect (Analytics reconciliation also checks every ~4s with up to ~60s archival delay).
+              </p>
+            ) : null}
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
               <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
-                <p className="text-slate-500">Outcome</p>
-                <p className="font-bold text-slate-800">{activeCall.outcome}</p>
-              </div>
-              <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
-                <p className="text-slate-500">Recording Consent</p>
+                <p className="text-slate-500">Sarvam Provider Status</p>
                 <p className="font-bold text-slate-800">
-                  {activeCall.recordingConsentGranted ? 'Granted' : 'Not Granted'}
+                  {activeCall.sarvamStatus || activeCall.providerStatusRaw || 'initiating'}
                 </p>
               </div>
               <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
-                <p className="text-slate-500">Dose Taken?</p>
-                <p className="font-bold text-slate-800">{activeCall.medicineConfirmed}</p>
+                <p className="text-slate-500">Outcome / Dose</p>
+                <p className="font-bold text-slate-800">
+                  {activeCall.outcome} • {activeCall.medicineConfirmed}
+                </p>
+              </div>
+              <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
+                <p className="text-slate-500">Duration</p>
+                <p className="font-bold text-slate-800">{activeCall.durationSeconds}s</p>
+              </div>
+              <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
+                <p className="text-slate-500">Language (Req / Actual)</p>
+                <p className="font-bold text-slate-800">
+                  {getLanguageLabel(activeCall.requestedLanguage || activeCall.language || 'te')}
+                  {activeCall.actualLanguageUsed
+                    ? ` → ${getLanguageLabel(activeCall.actualLanguageUsed)}`
+                    : ''}
+                </p>
+              </div>
+              <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
+                <p className="text-slate-500">Answered / Ended</p>
+                <p className="font-semibold text-slate-800">
+                  {activeCall.answeredAt
+                    ? formatDateTimeInTz(activeCall.answeredAt, selectedMember?.timezone)
+                    : 'Not answered'}{' '}
+                  /{' '}
+                  {activeCall.endedAt
+                    ? formatDateTimeInTz(activeCall.endedAt, selectedMember?.timezone)
+                    : 'Active'}
+                </p>
+              </div>
+              <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
+                <p className="text-slate-500">Last Update / Consents</p>
+                <p className="font-semibold text-slate-800">
+                  T:{activeCall.transcriptConsentGranted ? 'Yes' : 'No'} • R:
+                  {(activeCall.audioRecordingConsentGranted ?? activeCall.recordingConsentGranted)
+                    ? 'Yes'
+                    : 'No'}
+                </p>
+                <p className="text-[10px] text-slate-500">
+                  {activeCall.lastStatusUpdateAt
+                    ? formatDateTimeInTz(activeCall.lastStatusUpdateAt, selectedMember?.timezone)
+                    : 'Awaiting update'}
+                </p>
               </div>
             </div>
 
@@ -609,22 +945,70 @@ export function RealTestCallDialog({
                       selectedMember.voiceCallingConsentStatus === 'GRANTED' ? 'success' : 'danger'
                     }
                   >
-                    Calling Consent: {selectedMember.voiceCallingConsentStatus}
+                    Calling: {selectedMember.voiceCallingConsentStatus}
+                  </Badge>
+                  <Badge
+                    variant={
+                      (selectedMember.transcriptConsentStatus ?? 'PENDING') === 'GRANTED'
+                        ? 'success'
+                        : 'warning'
+                    }
+                  >
+                    Transcript: {selectedMember.transcriptConsentStatus ?? 'PENDING'}
                   </Badge>
                   <Badge
                     variant={
                       selectedMember.recordingConsentStatus === 'GRANTED' ? 'success' : 'warning'
                     }
                   >
-                    Recording Consent: {selectedMember.recordingConsentStatus}
+                    Audio Recording: {selectedMember.recordingConsentStatus}
                   </Badge>
                 </div>
-                {selectedMember.recordingConsentStatus !== 'GRANTED' ? (
+                {(selectedMember.transcriptConsentStatus ?? 'PENDING') !== 'GRANTED' ||
+                selectedMember.recordingConsentStatus !== 'GRANTED' ? (
                   <p className="text-[11px] text-amber-800">
-                    Recording consent is not GRANTED: automated calling may proceed if calling
-                    consent is GRANTED, and CareVoice will withhold recording audio & verbatim
-                    transcripts.
+                    Consents are independent:
+                    {(selectedMember.transcriptConsentStatus ?? 'PENDING') !== 'GRANTED'
+                      ? ' Transcripts will be withheld unless CALL_TRANSCRIPT is GRANTED.'
+                      : ''}
+                    {selectedMember.recordingConsentStatus !== 'GRANTED'
+                      ? ' Audio recordings will be withheld unless CALL_RECORDING is GRANTED.'
+                      : ''}
                   </p>
+                ) : null}
+                {(fallbackRequiredInfo || selectedLangOption?.sarvamSupported === false) ? (
+                  <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 space-y-2 text-amber-950">
+                    <p className="font-bold text-amber-900">
+                      Language Unavailable on Sarvam — Explicit Fallback Permission Required
+                    </p>
+                    <p className="text-[11px]">
+                      Requested language ({getLanguageLabel(selectedMember.preferredLanguage)}) is not
+                      natively enabled on Sarvam. CareVoice will never silently fall back to Hindi.
+                    </p>
+                    <label className="flex items-start gap-2 cursor-pointer font-semibold text-xs">
+                      <input
+                        type="checkbox"
+                        checked={allowLanguageFallback}
+                        onChange={(e) => setAllowLanguageFallback(e.target.checked)}
+                        className="mt-0.5 h-4 w-4 rounded border-amber-400 text-blue-600"
+                      />
+                      <span>Authorize explicit fallback language for this outbound call:</span>
+                    </label>
+                    {allowLanguageFallback ? (
+                      <SelectNative
+                        value={fallbackLanguage}
+                        onChange={(e) => setFallbackLanguage(e.target.value)}
+                      >
+                        {(fallbackRequiredInfo?.availableFallbackLanguages ??
+                          SUPPORTED_LANGUAGES.filter((l) => l.sarvamSupported).map((l) => l.code)
+                        ).map((code) => (
+                          <option key={code} value={code}>
+                            {getLanguageLabel(code)}
+                          </option>
+                        ))}
+                      </SelectNative>
+                    ) : null}
+                  </div>
                 ) : null}
                 {permissionBlockedReason ? (
                   <p className="text-rose-700 font-semibold flex items-center gap-1.5">

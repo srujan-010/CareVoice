@@ -5,6 +5,8 @@ export interface IConversationTurn {
   text: string;
   translatedText?: string;
   timestamp: Date;
+  language?: string;
+  turnId?: string | number;
   intent?: string;
 }
 
@@ -23,6 +25,8 @@ export interface IConversation extends Document {
   doseInstanceId?: Types.ObjectId;
   interactionId?: string;
   language: string;
+  actualLanguageUsed?: string;
+  transcriptSource?: 'WEBHOOK' | 'ANALYTICS_API' | 'MOCK' | 'NONE';
   turns: IConversationTurn[];
   patientResponses: IPatientResponses;
   finalAgentVariables?: Record<string, unknown>;
@@ -38,6 +42,8 @@ const conversationTurnSchema = new Schema<IConversationTurn>(
     text: { type: String, required: true },
     translatedText: { type: String },
     timestamp: { type: Date, default: Date.now },
+    language: { type: String, trim: true },
+    turnId: { type: Schema.Types.Mixed },
     intent: { type: String, trim: true },
   },
   { _id: false }
@@ -61,6 +67,12 @@ const conversationSchema = new Schema<IConversation>(
     doseInstanceId: { type: Schema.Types.ObjectId, ref: 'DoseInstance' },
     interactionId: { type: String, trim: true },
     language: { type: String, required: true },
+    actualLanguageUsed: { type: String, trim: true },
+    transcriptSource: {
+      type: String,
+      enum: ['WEBHOOK', 'ANALYTICS_API', 'MOCK', 'NONE'],
+      default: 'NONE',
+    },
     turns: { type: [conversationTurnSchema], default: [] },
     patientResponses: {
       mealFinished: { type: Boolean, default: null },

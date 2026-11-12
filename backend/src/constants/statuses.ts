@@ -65,15 +65,39 @@ export const CALL_LIFECYCLE_STATUSES = [
   'QUEUED',
   'INITIATING',
   'RINGING',
+  'ANSWERED',
   'IN_PROGRESS',
   'COMPLETED',
-  'FAILED',
   'NO_ANSWER',
   'BUSY',
   'REJECTED',
+  'FAILED',
+  'NOT_CONNECTED',
   'CANCELLED',
+  'LANGUAGE_UNAVAILABLE',
+  'LANGUAGE_FALLBACK_REQUIRED',
 ] as const;
 export type CallLifecycleStatus = (typeof CALL_LIFECYCLE_STATUSES)[number];
+
+export const ACTIVE_CALL_LIFECYCLE_STATUSES: CallLifecycleStatus[] = [
+  'QUEUED',
+  'INITIATING',
+  'RINGING',
+  'ANSWERED',
+  'IN_PROGRESS',
+];
+
+export const TERMINAL_CALL_LIFECYCLE_STATUSES: CallLifecycleStatus[] = [
+  'COMPLETED',
+  'NO_ANSWER',
+  'BUSY',
+  'REJECTED',
+  'FAILED',
+  'NOT_CONNECTED',
+  'CANCELLED',
+  'LANGUAGE_UNAVAILABLE',
+  'LANGUAGE_FALLBACK_REQUIRED',
+];
 
 export const CALL_OUTCOMES = [
   'PENDING',
@@ -82,12 +106,30 @@ export const CALL_OUTCOMES = [
   'BUSY',
   'REJECTED',
   'FAILED',
+  'NOT_CONNECTED',
   'COMPLETED',
   'CALLBACK_REQUESTED',
   'ESCALATED',
   'CANCELLED',
 ] as const;
 export type CallOutcome = (typeof CALL_OUTCOMES)[number];
+
+export const LANGUAGE_STATUSES = [
+  'MATCHED',
+  'LANGUAGE_UNAVAILABLE',
+  'LANGUAGE_FALLBACK_REQUIRED',
+  'FALLBACK_AUTHORIZED',
+  'LANGUAGE_MISMATCH',
+] as const;
+export type LanguageStatus = (typeof LANGUAGE_STATUSES)[number];
+
+export const TRANSCRIPT_STATUSES = [
+  'PENDING',
+  'AVAILABLE',
+  'UNAVAILABLE',
+  'CONSENT_DENIED',
+] as const;
+export type TranscriptStatus = (typeof TRANSCRIPT_STATUSES)[number];
 
 export const RECORDING_STATUSES = [
   'AVAILABLE',
@@ -116,11 +158,34 @@ export type CallbackStatus = (typeof CALLBACK_STATUSES)[number];
 
 export const CONSENT_TYPES = [
   'VOICE_CALLING',
+  'CALL_TRANSCRIPT',
   'CALL_RECORDING',
   'WHATSAPP_ALERTS',
   'SMS_ALERTS',
 ] as const;
 export type ConsentType = (typeof CONSENT_TYPES)[number];
+
+export function normalizeConsentTypeInput(raw: string): ConsentType | null {
+  const upper = raw.trim().toUpperCase();
+  if (upper === 'AUTOMATED_CALLING_CONSENT' || upper === 'VOICE_CALLING') return 'VOICE_CALLING';
+  if (
+    upper === 'TRANSCRIPT_CONSENT' ||
+    upper === 'TRANSCRIPT_STORAGE' ||
+    upper === 'CALL_TRANSCRIPT'
+  ) {
+    return 'CALL_TRANSCRIPT';
+  }
+  if (
+    upper === 'AUDIO_RECORDING_CONSENT' ||
+    upper === 'RECORDING_CONSENT' ||
+    upper === 'CALL_RECORDING'
+  ) {
+    return 'CALL_RECORDING';
+  }
+  if (upper === 'WHATSAPP_ALERTS') return 'WHATSAPP_ALERTS';
+  if (upper === 'SMS_ALERTS') return 'SMS_ALERTS';
+  return null;
+}
 
 export const CONSENT_STATUSES = ['GRANTED', 'DENIED', 'REVOKED', 'PENDING'] as const;
 export type ConsentStatus = (typeof CONSENT_STATUSES)[number];

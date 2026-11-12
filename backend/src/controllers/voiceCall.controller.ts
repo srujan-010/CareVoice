@@ -27,6 +27,9 @@ export async function triggerRealTestCall(req: Request, res: Response, next: Nex
       callType: req.body.callType,
       purpose: req.body.purpose,
       overrideQuietHours: Boolean(req.body.overrideQuietHours),
+      requestedLanguage: req.body.requestedLanguage,
+      fallbackLanguage: req.body.fallbackLanguage,
+      allowLanguageFallback: Boolean(req.body.allowLanguageFallback),
       ipAddress: req.ip,
     });
 
@@ -39,11 +42,27 @@ export async function triggerRealTestCall(req: Request, res: Response, next: Nex
 export async function getCallStatus(req: Request, res: Response, next: NextFunction) {
   try {
     if (!req.auth) throw new UnauthorizedError();
+    const reconcile = req.query.reconcile === 'true';
     const snapshot = await callService.getCallStatusSnapshot(
       req.auth.familyId,
-      String(req.params.id)
+      String(req.params.id),
+      { reconcile }
     );
     res.json({ success: true, data: snapshot });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function reconcileCall(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.auth) throw new UnauthorizedError();
+    const detail = await callService.reconcileSarvamCall({
+      familyId: req.auth.familyId,
+      callLogId: String(req.params.id),
+      force: true,
+    });
+    res.json({ success: true, data: detail });
   } catch (err) {
     next(err);
   }

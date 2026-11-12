@@ -1,5 +1,6 @@
 import { MockVoiceProvider } from '../adapters/voice/mockVoice.provider';
 import {
+  parseSarvamUtcTimestamp,
   SarvamDeploymentVerificationResult,
   SarvamVoiceProvider,
 } from '../adapters/voice/sarvamVoice.provider';
@@ -16,6 +17,7 @@ import {
   isMockSimulationAllowed,
   isTelephonyReady,
 } from '../config/env';
+import { tryGetSupportedLanguage } from '../constants/languages';
 import {
   CallLifecycleStatus,
   CallOutcome,
@@ -24,8 +26,34 @@ import {
 import { SarvamCallConnectivityStatus } from '../models/CallLog';
 import { normalizeAndValidateE164 } from '../utils/phone';
 
+export { parseSarvamUtcTimestamp };
+
 const mockProvider = new MockVoiceProvider();
 const sarvamProvider = new SarvamVoiceProvider();
+
+const SARVAM_SENTINEL_EMPTY_VALUES = new Set([
+  'no_failure_reason',
+  'no_end_reason',
+  'unknown',
+  'none',
+  'null',
+  'n/a',
+]);
+
+export function cleanSarvamSentinel(raw?: string | null): string | undefined {
+  if (!raw || typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (SARVAM_SENTINEL_EMPTY_VALUES.has(trimmed.toLowerCase())) return undefined;
+  return trimmed;
+}
+
+export function resolveSarvamLanguageCode(raw?: string | null): string | undefined {
+  const cleaned = cleanSarvamSentinel(raw);
+  if (!cleaned) return undefined;
+  const matched = tryGetSupportedLanguage(cleaned);
+  return matched ? matched.bcp47 : cleaned;
+}
 
 export interface SarvamTranscriptTurnInput {
   role?: string;
@@ -34,21 +62,31 @@ export interface SarvamTranscriptTurnInput {
   indic_text?: string;
   text?: string;
   content?: string;
+  message?: string;
   translatedText?: string;
   intent?: string;
+  timestamp?: string;
+  language?: string;
+  language_name?: string;
+  turn_id?: number | string;
 }
 
 export interface SarvamOutboundWebhookPayload {
   attempt_id: string;
-  status: SarvamCallConnectivityStatus;
+  status?: SarvamCallConnectivityStatus;
+  connectivity_status?: SarvamCallConnectivityStatus;
+  event_type?: string | null;
   event_id?: string | null;
   started_at?: string | null;
+  answered_at?: string | null;
   ended_at?: string | null;
+  ended_by?: string | null;
   recording_url?: string | null;
   channel_info?: Record<string, unknown> | null;
   duration?: number | null;
   interaction_id?: string | null;
   failure_reason?: string | null;
+  language_name?: string | null;
   final_agent_variables?: Record<string, unknown> | null;
   webhook_config?: {
     url?: string;
@@ -120,14 +158,27 @@ function readExplicitMedicineConfirmation(
 export function mapProviderRawStatusToLifecycle(rawStatus?: string): CallLifecycleStatus {
   const normalized = (rawStatus || '').trim().toLowerCase();
   if (normalized === 'queued') return 'QUEUED';
-  if (normalized === 'ringing' || normalized === 'ring') return 'RINGING';
-  if (normalized === 'in_progress' || normalized === 'answered' || normalized === 'ongoing') {
-    return 'IN_PROGRESS';
+  if (normalized === 'initiating' || normalized === 'initiated' || normalized === 'dialing') {
+    return 'INITIATING';
   }
-  if (normalized === 'completed' || normalized === 'connected') return 'COMPLETED';
-  if (normalized === 'no_answer') return 'NO_ANSWER';
+  if (normalized === 'ringing' || normalized === 'ring') return 'RINGING';
+  if (normalized === 'answered') return 'ANSWERED';
+  if (normalized === 'in_progress' || normalized === 'ongoing') return 'IN_PROGRESS';
+  if (normalized === 'completed' || normalized === 'connected' || normalized === 'succeeded') {
+    return 'COMPLETED';
+  }
+  if (normalized === 'no_answer' || normalized === 'no-answer' || normalized === 'unanswered') {
+    return 'NO_ANSWER';
+  }
   if (normalized === 'busy') return 'BUSY';
   if (normalized === 'rejected' || normalized === 'declined') return 'REJECTED';
+  if (
+    normalized === 'not_connected' ||
+    normalized === 'not-connected' ||
+    normalized === 'unreachable'
+  ) {
+    return 'NOT_CONNECTED';
+  }
   if (normalized === 'cancelled' || normalized === 'canceled') return 'CANCELLED';
   if (normalized === 'failed' || normalized === 'error') return 'FAILED';
   return 'INITIATING';
@@ -178,6 +229,26 @@ export async function fetchSarvamRecordingAudio(interactionId: string) {
   return sarvamProvider.fetchInteractionRecording(interactionId);
 }
 
+export async function probeSarvamRecording(interactionId: string) {
+  return sarvamProvider.probeInteractionRecording(interactionId);
+}
+
+export async function fetchSarvamAttemptById(attemptId: string, referenceDate?: Date) {
+  return sarvamProvider.fetchAttemptByAttemptId(attemptId, referenceDate);
+}
+
+export async function fetchSarvamInteraction(params: {
+  attemptId?: string;
+  interactionId?: string;
+  referenceDate?: Date;
+}) {
+  return sarvamProvider.fetchInteractionByAttemptOrId(params);
+}
+
+export async function fetchSarvamTranscript(interactionId: string) {
+  return sarvamProvider.fetchInteractionTranscript(interactionId);
+}
+
 export async function dispatchLiveVoiceCall(context: VoiceCallContextPayload) {
   const validatedUserPhone = normalizeAndValidateE164(
     context.phoneNumber,
@@ -202,7 +273,8 @@ export async function simulateMockVoiceCall(
  * or generic turn objects into CareVoice Conversation turns.
  */
 export function mapSarvamTranscript(
-  rawTranscript?: SarvamTranscriptTurnInput[] | null
+  rawTranscript?: SarvamTranscriptTurnInput[] | null,
+  defaultLanguage?: string
 ): SimulatedTurn[] {
   if (!Array.isArray(rawTranscript)) return [];
 
@@ -220,7 +292,9 @@ export function mapSarvamTranscript(
         ? item.text.trim()
         : typeof item.content === 'string'
           ? item.content.trim()
-          : '';
+          : typeof item.message === 'string'
+            ? item.message.trim()
+            : '';
 
     const primaryText = indicText || directText || enText;
     if (!primaryText) continue;
@@ -230,33 +304,159 @@ export function mapSarvamTranscript(
         ? item.translatedText.trim()
         : indicText && enText && indicText !== enText
           ? enText
-          : undefined;
+          : directText && enText && directText !== enText
+            ? enText
+            : undefined;
 
-    turns.push({
+    const parsedTimestamp =
+      typeof item.timestamp === 'string' ? parseSarvamUtcTimestamp(item.timestamp) : undefined;
+    const resolvedLanguage =
+      resolveSarvamLanguageCode(item.language || item.language_name) ||
+      (indicText ? resolveSarvamLanguageCode(defaultLanguage) : undefined);
+
+    const turn: SimulatedTurn = {
       speaker,
       text: primaryText,
       translatedText,
-      intent: typeof item.intent === 'string' && item.intent.trim() ? item.intent.trim() : undefined,
-    });
+    };
+    if (typeof item.intent === 'string' && item.intent.trim()) {
+      turn.intent = item.intent.trim();
+    }
+    if (parsedTimestamp) {
+      turn.timestamp = parsedTimestamp;
+    }
+    if (resolvedLanguage) {
+      turn.language = resolvedLanguage;
+    }
+    if (item.turn_id !== undefined && item.turn_id !== null && `${item.turn_id}`.trim()) {
+      turn.turnId = String(item.turn_id).trim();
+    }
+
+    turns.push(turn);
   }
 
   return turns;
 }
 
+function parseAnalyticsTurnItem(raw: unknown): {
+  speaker: 'AI' | 'PATIENT';
+  text: string;
+  language?: string;
+  turnId?: string;
+  timestamp?: Date;
+} | null {
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const match = trimmed.match(/^(assistant|agent|ai|user|patient)\s*[:\-]\s*(.+)$/i);
+    if (match) {
+      const role = match[1].toLowerCase();
+      return {
+        speaker: role === 'assistant' || role === 'agent' || role === 'ai' ? 'AI' : 'PATIENT',
+        text: match[2].trim(),
+      };
+    }
+    return { speaker: 'AI', text: trimmed };
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const rawRole = String(obj.role || obj.speaker || obj.sender || '')
+    .trim()
+    .toLowerCase();
+  const speaker: 'AI' | 'PATIENT' =
+    rawRole === 'agent' || rawRole === 'assistant' || rawRole === 'ai' ? 'AI' : 'PATIENT';
+  const text = String(
+    obj.content || obj.text || obj.message || obj.utterance || obj.indic_text || obj.en_text || ''
+  ).trim();
+  if (!text) return null;
+
+  const lang = resolveSarvamLanguageCode(
+    typeof obj.language_name === 'string'
+      ? obj.language_name
+      : typeof obj.language === 'string'
+        ? obj.language
+        : undefined
+  );
+  const ts =
+    typeof obj.timestamp === 'string' ? parseSarvamUtcTimestamp(obj.timestamp) : undefined;
+  const turnId =
+    obj.turn_id !== undefined && obj.turn_id !== null ? String(obj.turn_id).trim() : undefined;
+
+  return { speaker, text, language: lang, turnId, timestamp: ts };
+}
+
 /**
- * Interprets official Sarvam outbound webhook status + final_agent_variables.
+ * Merges Sarvam Analytics transcript sources (`GET /transcripts/{interaction_id}` messages
+ * and/or `GET /interactions?include_transcript=true` aligned original + English translations).
+ */
+export function mapSarvamAnalyticsTranscripts(input: {
+  originalTranscript?: unknown;
+  translateTranscript?: unknown;
+  messages?: Array<{
+    turn_id?: number | string;
+    role?: string;
+    content?: string;
+    language_name?: string;
+  }>;
+  defaultLanguage?: string;
+}): SimulatedTurn[] {
+  const originalArr = Array.isArray(input.originalTranscript) ? input.originalTranscript : [];
+  const translateArr = Array.isArray(input.translateTranscript) ? input.translateTranscript : [];
+  const messagesArr = Array.isArray(input.messages) ? input.messages : [];
+
+  const parsedOriginal = originalArr
+    .map(parseAnalyticsTurnItem)
+    .filter((t): t is NonNullable<typeof t> => Boolean(t));
+  const parsedTranslate = translateArr
+    .map(parseAnalyticsTurnItem)
+    .filter((t): t is NonNullable<typeof t> => Boolean(t));
+  const parsedMessages = messagesArr
+    .map(parseAnalyticsTurnItem)
+    .filter((t): t is NonNullable<typeof t> => Boolean(t));
+
+  // Prefer originalTranscript paired 1:1 with translateTranscript when present (preserves Indic + EN translation)
+  const baseTurns = parsedOriginal.length > 0 ? parsedOriginal : parsedMessages;
+  if (baseTurns.length === 0) return [];
+
+  return baseTurns.map((turn, idx) => {
+    const transCandidate = parsedTranslate[idx];
+    const translatedText =
+      transCandidate &&
+      transCandidate.text &&
+      transCandidate.text.trim() !== turn.text.trim()
+        ? transCandidate.text.trim()
+        : undefined;
+    const msgFallback = parsedMessages[idx];
+    const resolvedLanguage =
+      turn.language || msgFallback?.language || resolveSarvamLanguageCode(input.defaultLanguage);
+    const turnId = turn.turnId || msgFallback?.turnId || String(idx + 1);
+
+    const out: SimulatedTurn = {
+      speaker: turn.speaker,
+      text: turn.text,
+      translatedText,
+      turnId,
+    };
+    if (resolvedLanguage) out.language = resolvedLanguage;
+    if (turn.timestamp) out.timestamp = turn.timestamp;
+    return out;
+  });
+}
+
+/**
+ * Interprets official Sarvam outbound status + final_agent_variables (from webhook or Analytics).
  * Strict medical & privacy safety rules:
  * - Only terminal `connected`/`completed` calls may inspect patient intake variables.
- * - `no_answer`, `busy`, `rejected`, `cancelled`, and `failed` ALWAYS stay UNCONFIRMED.
+ * - `no_answer`, `busy`, `rejected`, `not_connected`, `cancelled`, and `failed` ALWAYS stay UNCONFIRMED.
  * - Meal confirmation (`meal_finished`) NEVER implies medicine intake.
  * - Medicine intake is marked `TAKEN` ONLY when explicit confirmation variables support it.
- * - Verbatim transcript turns are stored/exposed ONLY when recording/transcription consent is GRANTED.
+ * - Verbatim transcript turns & summary notes are stored/exposed ONLY when `CALL_TRANSCRIPT` consent is GRANTED.
  */
 export function evaluateSarvamAgentOutcome(
   payload: SarvamOutboundWebhookPayload,
   patientName: string,
   medicineName: string,
-  options: { recordingConsentGranted?: boolean } = {}
+  options: { recordingConsentGranted?: boolean; transcriptConsentGranted?: boolean } = {}
 ): {
   isIntermediateEvent: boolean;
   callStatus: CallLifecycleStatus;
@@ -270,20 +470,42 @@ export function evaluateSarvamAgentOutcome(
   turns: SimulatedTurn[];
   aiSummary: string;
   safetyFlags: string[];
+  actualLanguageUsed?: string;
 } {
-  const recordingConsentGranted = options.recordingConsentGranted ?? true;
+  const audioRecordingConsentGranted = options.recordingConsentGranted ?? true;
+  const transcriptConsentGranted =
+    options.transcriptConsentGranted ?? options.recordingConsentGranted ?? true;
+
+  const rawStatus = (payload.status || payload.connectivity_status || '')
+    .toString()
+    .trim()
+    .toLowerCase();
+
   const durationSeconds =
     typeof payload.duration === 'number' && Number.isFinite(payload.duration) && payload.duration > 0
       ? Math.round(payload.duration)
       : 0;
 
+  const vars = payload.final_agent_variables ?? null;
+  const actualLanguageUsed =
+    resolveSarvamLanguageCode(
+      payload.language_name ||
+        (vars && typeof vars.language_name === 'string' ? vars.language_name : undefined) ||
+        (vars && typeof vars.detected_language === 'string' ? vars.detected_language : undefined)
+    );
+
   if (
-    payload.status === 'queued' ||
-    payload.status === 'initiating' ||
-    payload.status === 'ringing' ||
-    payload.status === 'in_progress'
+    rawStatus === 'queued' ||
+    rawStatus === 'initiating' ||
+    rawStatus === 'initiated' ||
+    rawStatus === 'dialing' ||
+    rawStatus === 'ringing' ||
+    rawStatus === 'ring' ||
+    rawStatus === 'answered' ||
+    rawStatus === 'in_progress' ||
+    rawStatus === 'ongoing'
   ) {
-    const lifecycle = mapProviderRawStatusToLifecycle(payload.status);
+    const lifecycle = mapProviderRawStatusToLifecycle(rawStatus);
     return {
       isIntermediateEvent: true,
       callStatus: lifecycle,
@@ -296,10 +518,11 @@ export function evaluateSarvamAgentOutcome(
       turns: [],
       aiSummary: `Sarvam outbound call to ${patientName} is currently ${lifecycle}. Awaiting completion.`,
       safetyFlags: [`SARVAM_${lifecycle}`],
+      actualLanguageUsed,
     };
   }
 
-  if (payload.status === 'no_answer') {
+  if (rawStatus === 'no_answer' || rawStatus === 'no-answer' || rawStatus === 'unanswered') {
     return {
       isIntermediateEvent: false,
       callStatus: 'NO_ANSWER',
@@ -312,10 +535,11 @@ export function evaluateSarvamAgentOutcome(
       turns: [],
       aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} had no answer. Dose remains UNCONFIRMED.`,
       safetyFlags: ['SARVAM_NO_ANSWER', 'DOSE_UNCONFIRMED'],
+      actualLanguageUsed,
     };
   }
 
-  if (payload.status === 'busy') {
+  if (rawStatus === 'busy') {
     return {
       isIntermediateEvent: false,
       callStatus: 'BUSY',
@@ -328,10 +552,11 @@ export function evaluateSarvamAgentOutcome(
       turns: [],
       aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} encountered a busy line. Dose remains UNCONFIRMED.`,
       safetyFlags: ['SARVAM_BUSY', 'DOSE_UNCONFIRMED'],
+      actualLanguageUsed,
     };
   }
 
-  if (payload.status === 'rejected') {
+  if (rawStatus === 'rejected' || rawStatus === 'declined') {
     return {
       isIntermediateEvent: false,
       callStatus: 'REJECTED',
@@ -344,10 +569,34 @@ export function evaluateSarvamAgentOutcome(
       turns: [],
       aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} was rejected. Dose remains UNCONFIRMED.`,
       safetyFlags: ['SARVAM_REJECTED', 'DOSE_UNCONFIRMED'],
+      actualLanguageUsed,
     };
   }
 
-  if (payload.status === 'cancelled' || payload.status === 'canceled') {
+  if (
+    rawStatus === 'not_connected' ||
+    rawStatus === 'not-connected' ||
+    rawStatus === 'unreachable'
+  ) {
+    const cleanReason = cleanSarvamSentinel(payload.failure_reason);
+    const reasonText = cleanReason ? ` (${cleanReason})` : '';
+    return {
+      isIntermediateEvent: false,
+      callStatus: 'NOT_CONNECTED',
+      outcome: 'NOT_CONNECTED',
+      durationSeconds,
+      mealConfirmed: null,
+      medicineConfirmed: 'UNCONFIRMED',
+      feelingUnwell: false,
+      requestedHelp: false,
+      turns: [],
+      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} did not connect${reasonText}. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['SARVAM_NOT_CONNECTED', 'DOSE_UNCONFIRMED'],
+      actualLanguageUsed,
+    };
+  }
+
+  if (rawStatus === 'cancelled' || rawStatus === 'canceled') {
     return {
       isIntermediateEvent: false,
       callStatus: 'CANCELLED',
@@ -360,11 +609,13 @@ export function evaluateSarvamAgentOutcome(
       turns: [],
       aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} was cancelled before completion. Dose remains UNCONFIRMED.`,
       safetyFlags: ['SARVAM_CANCELLED', 'DOSE_UNCONFIRMED'],
+      actualLanguageUsed,
     };
   }
 
-  if (payload.status === 'failed') {
-    const reasonText = payload.failure_reason ? ` (${payload.failure_reason})` : '';
+  if (rawStatus === 'failed' || rawStatus === 'error') {
+    const cleanReason = cleanSarvamSentinel(payload.failure_reason);
+    const reasonText = cleanReason ? ` (${cleanReason})` : '';
     return {
       isIntermediateEvent: false,
       callStatus: 'FAILED',
@@ -377,13 +628,30 @@ export function evaluateSarvamAgentOutcome(
       turns: [],
       aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} failed${reasonText}. Dose remains UNCONFIRMED.`,
       safetyFlags: ['SARVAM_CALL_FAILED', 'DOSE_UNCONFIRMED'],
+      actualLanguageUsed,
+    };
+  }
+
+  if (rawStatus !== 'connected' && rawStatus !== 'completed' && rawStatus !== 'succeeded') {
+    return {
+      isIntermediateEvent: false,
+      callStatus: 'FAILED',
+      outcome: 'FAILED',
+      durationSeconds,
+      mealConfirmed: null,
+      medicineConfirmed: 'UNCONFIRMED',
+      feelingUnwell: false,
+      requestedHelp: false,
+      turns: [],
+      aiSummary: `Sarvam returned unrecognized status "${rawStatus || 'UNKNOWN'}" for ${patientName}. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['SARVAM_UNRECOGNIZED_STATUS', 'DOSE_UNCONFIRMED'],
+      actualLanguageUsed,
     };
   }
 
   // status === 'connected' | 'completed'
-  const vars = payload.final_agent_variables ?? null;
-  const turns = recordingConsentGranted
-    ? mapSarvamTranscript(payload.interaction_transcript)
+  const turns = transcriptConsentGranted
+    ? mapSarvamTranscript(payload.interaction_transcript, actualLanguageUsed)
     : [];
 
   const feelingUnwell =
@@ -439,8 +707,12 @@ export function evaluateSarvamAgentOutcome(
   let outcome: CallOutcome;
   const safetyFlags: string[] = [];
 
-  if (!recordingConsentGranted) {
+  if (!transcriptConsentGranted && !audioRecordingConsentGranted) {
     safetyFlags.push('RECORDING_AND_TRANSCRIPT_WITHHELD_NO_CONSENT');
+  } else if (!transcriptConsentGranted) {
+    safetyFlags.push('TRANSCRIPT_WITHHELD_NO_CONSENT');
+  } else if (!audioRecordingConsentGranted) {
+    safetyFlags.push('RECORDING_WITHHELD_NO_CONSENT');
   }
 
   if (feelingUnwell || requestedHelp) {
@@ -464,7 +736,7 @@ export function evaluateSarvamAgentOutcome(
   }
 
   const summaryVar =
-    recordingConsentGranted && vars && typeof vars.summary === 'string' && vars.summary.trim()
+    transcriptConsentGranted && vars && typeof vars.summary === 'string' && vars.summary.trim()
       ? vars.summary.trim()
       : undefined;
 
@@ -493,5 +765,6 @@ export function evaluateSarvamAgentOutcome(
     turns,
     aiSummary,
     safetyFlags,
+    actualLanguageUsed,
   };
 }

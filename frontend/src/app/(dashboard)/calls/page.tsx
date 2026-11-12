@@ -23,9 +23,15 @@ import { SelectNative } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { apiRequest } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { getLanguageLabel } from '@/lib/constants';
+import { getCallLifecycleBadgeVariant, getLanguageLabel } from '@/lib/constants';
 import { formatDateTimeInTz } from '@/lib/utils';
-import type { CallLifecycleStatus, FamilyMember, VoiceCallPreflight } from '@/types';
+import type {
+  CallLifecycleStatus,
+  FamilyMember,
+  LanguageStatus,
+  TranscriptStatus,
+  VoiceCallPreflight,
+} from '@/types';
 
 interface CallLogRow {
   _id: string;
@@ -35,6 +41,9 @@ interface CallLogRow {
   callType: string;
   phoneNumber: string;
   language: string;
+  requestedLanguage?: string;
+  actualLanguageUsed?: string;
+  languageStatus?: LanguageStatus;
   scheduledAt: string;
   startedAt?: string;
   endedAt?: string;
@@ -43,6 +52,9 @@ interface CallLogRow {
   outcome: string;
   recordingStatus: string;
   transcriptAvailable: boolean;
+  transcriptStatus?: TranscriptStatus;
+  audioRecordingConsentGranted?: boolean;
+  transcriptConsentGranted?: boolean;
   mealConfirmed: boolean | null;
   medicineConfirmed: string;
   mode: 'mock' | 'live';
@@ -56,17 +68,9 @@ const ACTIVE_STATUSES: CallLifecycleStatus[] = [
   'QUEUED',
   'INITIATING',
   'RINGING',
+  'ANSWERED',
   'IN_PROGRESS',
 ];
-
-function getLifecycleVariant(status?: CallLifecycleStatus) {
-  if (status === 'COMPLETED') return 'success' as const;
-  if (status === 'FAILED' || status === 'REJECTED') return 'danger' as const;
-  if (status === 'NO_ANSWER' || status === 'BUSY' || status === 'CANCELLED') {
-    return 'warning' as const;
-  }
-  return 'indigo' as const;
-}
 
 export default function CallsPage() {
   const router = useRouter();
@@ -241,12 +245,16 @@ export default function CallsPage() {
             <option value="QUEUED">Queued</option>
             <option value="INITIATING">Initiating</option>
             <option value="RINGING">Ringing</option>
+            <option value="ANSWERED">Answered</option>
             <option value="IN_PROGRESS">In Progress</option>
             <option value="COMPLETED">Completed</option>
             <option value="NO_ANSWER">No Answer</option>
             <option value="BUSY">Busy</option>
             <option value="REJECTED">Rejected</option>
+            <option value="NOT_CONNECTED">Not Connected</option>
             <option value="CANCELLED">Cancelled</option>
+            <option value="LANGUAGE_FALLBACK_REQUIRED">Language Fallback Required</option>
+            <option value="LANGUAGE_UNAVAILABLE">Language Unavailable</option>
             <option value="FAILED">Failed</option>
           </SelectNative>
           <SelectNative
@@ -261,6 +269,7 @@ export default function CallsPage() {
             <option value="NO_ANSWER">No Answer</option>
             <option value="BUSY">Busy</option>
             <option value="REJECTED">Rejected</option>
+            <option value="NOT_CONNECTED">Not Connected</option>
             <option value="CANCELLED">Cancelled</option>
             <option value="FAILED">Failed</option>
             <option value="ESCALATED">Escalated</option>
@@ -349,17 +358,27 @@ export default function CallsPage() {
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-col items-start gap-1">
-                          <Badge variant={getLifecycleVariant(lifecycle)}>{lifecycle}</Badge>
+                          <Badge variant={getCallLifecycleBadgeVariant(lifecycle)}>
+                            {lifecycle}
+                          </Badge>
                           <span className="text-[11px] text-slate-500">
                             Outcome: {c.outcome}
                           </span>
                         </div>
                       </td>
-                      <td className="px-4 py-3 text-xs text-slate-700">
-                        {getLanguageLabel(c.language)}
+                      <td className="px-4 py-3 text-xs text-slate-700 space-y-1">
+                        <div>{getLanguageLabel(c.requestedLanguage || c.language)}</div>
+                        {c.actualLanguageUsed &&
+                        c.actualLanguageUsed !== (c.requestedLanguage || c.language) ? (
+                          <Badge variant="warning">
+                            Actual: {getLanguageLabel(c.actualLanguageUsed)}
+                          </Badge>
+                        ) : c.languageStatus === 'FALLBACK_AUTHORIZED' ? (
+                          <Badge variant="default">Fallback Authorized</Badge>
+                        ) : null}
                       </td>
                       <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <Badge
                             variant={
                               c.recordingStatus === 'AVAILABLE'
@@ -373,13 +392,23 @@ export default function CallsPage() {
                             {c.recordingStatus === 'AVAILABLE'
                               ? 'Audio'
                               : c.recordingStatus === 'CONSENT_DENIED'
-                                ? 'No Consent'
+                                ? 'No Audio Consent'
                                 : c.recordingStatus}
                           </Badge>
                           {c.transcriptAvailable ? (
-                            <Badge variant="default">
+                            <Badge variant="success">
                               <FileText className="h-3 w-3" />
-                              Text
+                              Transcript
+                            </Badge>
+                          ) : c.transcriptStatus === 'CONSENT_DENIED' ? (
+                            <Badge variant="warning">
+                              <FileText className="h-3 w-3" />
+                              No Text Consent
+                            </Badge>
+                          ) : c.transcriptStatus === 'PENDING' ? (
+                            <Badge variant="neutral">
+                              <FileText className="h-3 w-3" />
+                              Text Syncing
                             </Badge>
                           ) : null}
                         </div>

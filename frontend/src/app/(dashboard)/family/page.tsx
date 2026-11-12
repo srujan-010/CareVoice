@@ -198,9 +198,14 @@ export default function FamilyMembersPage() {
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <ShieldCheck className="h-3.5 w-3.5 text-blue-500" />
+                    <ShieldCheck className="h-3.5 w-3.5 text-blue-500 shrink-0" />
                     <span>
-                      Recording Consent:{' '}
+                      Calls: <strong className="text-slate-800">{member.voiceCallingConsentStatus}</strong>{' '}
+                      • Transcript:{' '}
+                      <strong className="text-slate-800">
+                        {member.transcriptConsentStatus ?? 'PENDING'}
+                      </strong>{' '}
+                      • Audio:{' '}
                       <strong className="text-slate-800">{member.recordingConsentStatus}</strong>
                     </span>
                   </div>
