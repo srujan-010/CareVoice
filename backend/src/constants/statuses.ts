@@ -229,3 +229,11 @@ export type EscalationSeverity = (typeof ESCALATION_SEVERITIES)[number];
 export const ESCALATION_STATUSES = ['OPEN', 'ACKNOWLEDGED', 'RESOLVED', 'DISMISSED'] as const;
 export type EscalationStatus = (typeof ESCALATION_STATUSES)[number];
 
+export const CALL_ERROR_CATEGORIES = [
+  'CONFIGURATION_ERROR',
+  'LANGUAGE_UNAVAILABLE',
+  'AUTHENTICATION_ERROR',
+  'PROVIDER_ERROR',
+] as const;
+export type CallErrorCategory = (typeof CALL_ERROR_CATEGORIES)[number];
+

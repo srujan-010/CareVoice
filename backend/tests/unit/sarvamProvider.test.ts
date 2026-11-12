@@ -167,6 +167,24 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
     expect((init.headers as Record<string, string>)['X-API-Key']).toBe(secretApiKey);
 
     const parsedBody = JSON.parse(String(init.body));
+    // Default "committed" profile sends ONLY the 8 verified Family Medicine Assistant Sarvam variables:
+    // internal DB IDs (patient_id, dose_id, call_log_id), duplicate aliases (patient_name, preferred_language),
+    // and unsupported voice variables (voice_gender) MUST NEVER be sent in agent_variables.
+    expect(parsedBody.app_config.agent_variables).toEqual({
+      call_purpose: 'MEDICINE_REMINDER',
+      doctor_instructions: 'Take 1 tablet before breakfast',
+      dosage: '500mg',
+      dose_number: '1',
+      food_instruction: 'BEFORE_FOOD',
+      meal: 'BREAKFAST',
+      medicine_name: 'Metformin',
+      user_name: 'Savitri Devi',
+    });
+    expect(parsedBody.app_config.agent_variables).not.toHaveProperty('patient_id');
+    expect(parsedBody.app_config.agent_variables).not.toHaveProperty('dose_id');
+    expect(parsedBody.app_config.agent_variables).not.toHaveProperty('call_log_id');
+    expect(parsedBody.app_config.agent_variables).not.toHaveProperty('patient_name');
+    expect(parsedBody.app_config.agent_variables).not.toHaveProperty('voice_gender');
     expect(parsedBody).toMatchObject({
       app_config: {
         app_id: 'agent-id-789',
@@ -174,19 +192,6 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
         connection_config: {
           connection_id: 'conn-id-abc',
           agent_phone_number: '+918012345678',
-        },
-        agent_variables: {
-          patient_name: 'Savitri Devi',
-          preferred_language: 'Telugu',
-          language_name: 'Telugu',
-          language_code: 'te',
-          language_bcp47: 'te-IN',
-          recommended_voice: 'Manisha',
-          medicine_name: 'Metformin',
-          dosage: '500mg',
-          patient_id: 'member_001',
-          dose_id: 'dose_001',
-          call_log_id: 'call_log_001',
         },
         app_overrides: {
           initial_language_name: 'Telugu',
@@ -216,7 +221,8 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
       },
     });
     expect(parsedBody.app_config.app_overrides.initial_bot_message).toContain('నమస్కారం');
-    expect(parsedBody.app_config.agent_variables.language_directive).toContain('Telugu (te-IN)');
+    expect(parsedBody.app_config.app_overrides.initial_bot_message).toContain('Savitri Devi');
+    expect(parsedBody.app_config.app_overrides.initial_bot_message).toContain('Metformin');
 
     // Reject non-E.164 patient phone numbers prior to outbound HTTP call
     const provider = new SarvamVoiceProvider();
@@ -494,6 +500,16 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
 
     // Safe non-dialing outbound request preparation works cleanly without HTTP calls
     const prepared = provider.buildOutboundPayload(sampleContext);
+    expect(prepared.app_config.agent_variables).toEqual({
+      call_purpose: 'MEDICINE_REMINDER',
+      doctor_instructions: 'Take 1 tablet before breakfast',
+      dosage: '500mg',
+      dose_number: '1',
+      food_instruction: 'BEFORE_FOOD',
+      meal: 'BREAKFAST',
+      medicine_name: 'Metformin',
+      user_name: 'Savitri Devi',
+    });
     expect(prepared.app_config).toMatchObject({
       app_id: 'Conversatio-a7e64173-3c11',
       app_version: 3,
@@ -503,11 +519,6 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
       },
       app_overrides: {
         initial_language_name: 'Telugu',
-      },
-      agent_variables: {
-        language_code: 'te',
-        language_bcp47: 'te-IN',
-        preferred_language: 'Telugu',
       },
     });
     expect(prepared.app_config.app_overrides?.initial_bot_message).toContain('నమస్కారం');
@@ -976,5 +987,188 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
         languageBcp47: 'ur-IN',
       })
     ).toThrow(/not supported/i);
+  });
+
+  it('validates canonical agent variables locally before calling Sarvam and classifies HTTP 422 variable errors as CONFIGURATION_ERROR (never LANGUAGE_UNSUPPORTED)', async () => {
+    vi.resetModules();
+    vi.stubEnv('TELEPHONY_ENABLED', 'true');
+    vi.stubEnv('VOICE_PROVIDER_MODE', 'sarvam');
+    vi.stubEnv('SARVAM_API_BASE_URL', 'https://apps.sarvam.ai');
+    vi.stubEnv('SARVAM_API_KEY', 'sk_test_schema_guard');
+    vi.stubEnv('SARVAM_ORG_ID', 'org-1');
+    vi.stubEnv('SARVAM_WORKSPACE_ID', 'ws-1');
+    vi.stubEnv('SARVAM_AGENT_ID', 'Conversatio-a7e64173-3c11');
+    vi.stubEnv('SARVAM_AGENT_VERSION', '2');
+    vi.stubEnv('SARVAM_CONNECTION_ID', 'conn-1');
+    vi.stubEnv('SARVAM_PHONE_NUMBER', '+917965860596');
+    vi.stubEnv('SARVAM_WEBHOOK_TOKEN', 'tok_schema_1234567890123456');
+    vi.stubEnv('PUBLIC_WEBHOOK_BASE_URL', 'https://carevoice.onrender.com');
+    vi.stubEnv(
+      'SARVAM_ALLOWED_AGENT_VARIABLES',
+      'medicine_name,dosage,food_instruction,call_purpose,patient_label,preferred_language_label'
+    );
+    vi.stubEnv(
+      'SARVAM_AGENT_VARIABLE_MAP',
+      JSON.stringify({
+        patient_label: 'user_name',
+        preferred_language_label: 'language_name',
+      })
+    );
+
+    const { SarvamVoiceProvider } = await import('../../src/adapters/voice/sarvamVoice.provider');
+    const provider = new SarvamVoiceProvider();
+
+    // 1. Canonical allowlist + alias mapping sends ONLY declared keys
+    const configuredPayload = provider.buildOutboundPayload(sampleContext);
+    expect(configuredPayload.app_config.agent_variables).toEqual({
+      medicine_name: 'Metformin',
+      dosage: '500mg',
+      food_instruction: 'BEFORE_FOOD',
+      call_purpose: 'MEDICINE_REMINDER',
+      patient_label: 'Savitri Devi',
+      preferred_language_label: 'Telugu',
+    });
+    expect(configuredPayload.app_config.app_overrides).toMatchObject({
+      initial_language_name: 'Telugu',
+    });
+
+    // 1b. Extended canonical profile sends exact 13 variables (existing 8 + 5 language/meal variables) and rejects internal IDs / duplicate aliases / voice_gender
+    vi.resetModules();
+    vi.stubEnv('TELEPHONY_ENABLED', 'true');
+    vi.stubEnv('VOICE_PROVIDER_MODE', 'sarvam');
+    vi.stubEnv('SARVAM_API_BASE_URL', 'https://apps.sarvam.ai');
+    vi.stubEnv('SARVAM_API_KEY', 'sk_test_schema_guard');
+    vi.stubEnv('SARVAM_ORG_ID', 'org-1');
+    vi.stubEnv('SARVAM_WORKSPACE_ID', 'ws-1');
+    vi.stubEnv('SARVAM_AGENT_ID', 'Conversatio-a7e64173-3c11');
+    vi.stubEnv('SARVAM_AGENT_VERSION', '3');
+    vi.stubEnv('SARVAM_CONNECTION_ID', 'conn-1');
+    vi.stubEnv('SARVAM_PHONE_NUMBER', '+917965860596');
+    vi.stubEnv('SARVAM_WEBHOOK_TOKEN', 'tok_schema_1234567890123456');
+    vi.stubEnv('PUBLIC_WEBHOOK_BASE_URL', 'https://carevoice.onrender.com');
+    vi.stubEnv('SARVAM_AGENT_VARIABLE_PROFILE', 'extended');
+    vi.stubEnv('SARVAM_ALLOWED_AGENT_VARIABLES', '');
+    vi.stubEnv('SARVAM_AGENT_VARIABLE_MAP', '');
+
+    const { SarvamVoiceProvider: ExtendedProvider } = await import(
+      '../../src/adapters/voice/sarvamVoice.provider'
+    );
+    const extProvider = new ExtendedProvider();
+    const extendedPayload = extProvider.buildOutboundPayload({
+      ...sampleContext,
+      doseNumber: 2,
+      slotLabel: 'Before Breakfast',
+    });
+    expect(Object.keys(extendedPayload.app_config.agent_variables || {}).sort()).toEqual([
+      'associated_meal',
+      'call_purpose',
+      'doctor_instructions',
+      'dosage',
+      'dose_number',
+      'food_instruction',
+      'language_code',
+      'language_directive',
+      'language_name',
+      'meal',
+      'medicine_name',
+      'slot_label',
+      'user_name',
+    ]);
+    expect(extendedPayload.app_config.agent_variables).toMatchObject({
+      user_name: 'Savitri Devi',
+      dose_number: '2',
+      slot_label: 'Before Breakfast',
+      associated_meal: 'BREAKFAST',
+      meal: 'BREAKFAST',
+      language_name: 'Telugu',
+      language_code: 'te',
+      doctor_instructions: 'Take 1 tablet before breakfast',
+    });
+    for (const forbidden of [
+      'patient_id',
+      'dose_id',
+      'call_log_id',
+      'patient_name',
+      'preferred_language',
+      'voice_gender',
+      'recommended_voice',
+    ]) {
+      expect(extendedPayload.app_config.agent_variables).not.toHaveProperty(forbidden);
+    }
+
+    // 2. Unknown or internal-only extraAgentVariables rejected locally BEFORE making any HTTP call
+    const neverCalledFetch = vi.fn();
+    vi.stubGlobal('fetch', neverCalledFetch);
+    await expect(
+      extProvider.initiateLiveCall({
+        ...sampleContext,
+        extraAgentVariables: { undeclared_field: 'should_block_locally' },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'CONFIGURATION_ERROR',
+      details: expect.objectContaining({
+        errorCategory: 'CONFIGURATION_ERROR',
+        invalidVariables: ['undeclared_field'],
+      }),
+    });
+    await expect(
+      extProvider.initiateLiveCall({
+        ...sampleContext,
+        extraAgentVariables: { patient_id: 'leak_internal_id', voice_gender: 'FEMALE' },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'CONFIGURATION_ERROR',
+      details: expect.objectContaining({
+        errorCategory: 'CONFIGURATION_ERROR',
+        invalidVariables: expect.arrayContaining(['patient_id', 'voice_gender']),
+      }),
+    });
+    expect(neverCalledFetch).not.toHaveBeenCalled();
+
+    // 3. Exact production HTTP 422 containing "language_name" inside rejected agent variables MUST classify as CONFIGURATION_ERROR (never LANGUAGE_UNSUPPORTED)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        text: async () =>
+          JSON.stringify({
+            detail:
+              "Invalid Parameter – Agent variables not found in agent variables of app 'Conversatio-a7e64173-3c11'. Rejected variables include: slot_label, associated_meal, voice_gender, patient_name, dose_id, patient_id, language_code, language_bcp47, preferred_language, recommended_voice, language_directive, call_type, language_name, call_log_id",
+          }),
+      })
+    );
+    await expect(extProvider.initiateLiveCall(sampleContext)).rejects.toMatchObject({
+      code: 'SARVAM_PROVIDER_ERROR',
+      details: expect.objectContaining({
+        upstreamStatus: 422,
+        authCategory: 'CONFIGURATION_ERROR',
+        errorCategory: 'CONFIGURATION_ERROR',
+      }),
+    });
+
+    // 4. Genuine initial_language_name rejection classifies as LANGUAGE_UNSUPPORTED / LANGUAGE_FALLBACK_REQUIRED
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        text: async () =>
+          JSON.stringify({
+            detail: "initial_language_name 'Telugu' is not supported for this app",
+          }),
+      })
+    );
+    await expect(extProvider.initiateLiveCall(sampleContext)).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'LANGUAGE_FALLBACK_REQUIRED',
+      details: expect.objectContaining({
+        upstreamStatus: 422,
+        authCategory: 'LANGUAGE_UNSUPPORTED',
+        errorCategory: 'LANGUAGE_UNAVAILABLE',
+      }),
+    });
   });
 });

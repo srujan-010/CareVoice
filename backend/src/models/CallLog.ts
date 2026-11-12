@@ -1,8 +1,10 @@
 import mongoose, { Document, Schema, Types } from 'mongoose';
 import {
+  CALL_ERROR_CATEGORIES,
   CALL_LIFECYCLE_STATUSES,
   CALL_OUTCOMES,
   CALL_TYPES,
+  CallErrorCategory,
   CallLifecycleStatus,
   CallOutcome,
   CallType,
@@ -67,6 +69,7 @@ export interface ICallLog extends Document {
   sarvamStatus?: SarvamCallConnectivityStatus;
   providerStatusRaw?: string;
   failureReason?: string;
+  errorCategory?: CallErrorCategory;
   channelInfo?: Record<string, unknown>;
   finalAgentVariables?: Record<string, unknown>;
   providerResponseMeta?: Record<string, unknown>;
@@ -163,6 +166,7 @@ const callLogSchema = new Schema<ICallLog>(
     sarvamStatus: { type: String, trim: true, lowercase: true },
     providerStatusRaw: { type: String, trim: true },
     failureReason: { type: String, trim: true, maxlength: 1000 },
+    errorCategory: { type: String, enum: CALL_ERROR_CATEGORIES },
     channelInfo: { type: Schema.Types.Mixed },
     finalAgentVariables: { type: Schema.Types.Mixed },
     providerResponseMeta: { type: Schema.Types.Mixed },

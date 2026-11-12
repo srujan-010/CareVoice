@@ -31,6 +31,7 @@ export interface VoiceCallContextPayload {
   medicineId: string;
   medicineName: string;
   dosage: string;
+  doseNumber?: number;
   foodInstruction: string;
   associatedMeal: string;
   slotLabel?: string;
@@ -41,6 +42,7 @@ export interface VoiceCallContextPayload {
   isTestCall?: boolean;
   scheduledAtIso: string;
   safetyDirectives: string[];
+  extraAgentVariables?: Record<string, string>;
 }
 
 export interface SimulatedTurn {

@@ -50,6 +50,7 @@ import { createEscalation } from './escalation.service';
 import { dispatchFamilyAlert } from './notification.service';
 import {
   SarvamOutboundWebhookPayload,
+  classifySarvamSchedulerError,
   cleanSarvamSentinel,
   dispatchLiveVoiceCall,
   evaluateSarvamAgentOutcome,
@@ -67,6 +68,8 @@ import {
   verifySarvamAgentDeployment,
 } from './sarvamVoice.service';
 import { MEDICAL_SAFETY_DIRECTIVES } from './voiceContext.service';
+import { enqueueCallJob } from '../queues/queueManager';
+import { logger } from '../utils/logger';
 
 const ACTIVE_CALL_STATUSES: CallLifecycleStatus[] = [
   'QUEUED',
@@ -1044,6 +1047,7 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
     medicineId: String(medicine._id),
     medicineName: medicine.name,
     dosage: medicine.dosage,
+    doseNumber: typeof dose.slotIndex === 'number' ? dose.slotIndex + 1 : 1,
     foodInstruction: dose.foodInstruction,
     associatedMeal: dose.associatedMeal,
     slotLabel: dose.slotLabel,
@@ -1123,15 +1127,20 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
       deploymentCheck,
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Sarvam outbound dispatch failed';
+    const classified = classifySarvamSchedulerError(err);
+    const msg = classified.detail;
     const failedAt = new Date();
     const isLangFallbackRequired =
-      err instanceof AppError && err.code === 'LANGUAGE_FALLBACK_REQUIRED';
+      (err instanceof AppError && err.code === 'LANGUAGE_FALLBACK_REQUIRED') ||
+      classified.category === 'LANGUAGE_UNAVAILABLE';
 
     callLog.callStatus = isLangFallbackRequired ? 'LANGUAGE_FALLBACK_REQUIRED' : 'FAILED';
     callLog.outcome = 'FAILED';
-    callLog.sarvamStatus = 'failed';
-    callLog.providerStatusRaw = isLangFallbackRequired ? 'LANGUAGE_UNAVAILABLE' : 'failed';
+    callLog.sarvamStatus = isLangFallbackRequired ? 'language_unavailable' : 'failed';
+    callLog.providerStatusRaw = isLangFallbackRequired
+      ? 'LANGUAGE_UNAVAILABLE'
+      : classified.category;
+    callLog.errorCategory = classified.category;
     if (isLangFallbackRequired) {
       callLog.languageStatus = 'LANGUAGE_UNAVAILABLE';
     }
@@ -1141,6 +1150,8 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
     callLog.providerResponseMeta = {
       error: msg.slice(0, 500),
       code: err instanceof AppError ? err.code : 'SARVAM_PROVIDER_ERROR',
+      errorCategory: classified.category,
+      nonRetryable: classified.nonRetryable,
       details: err instanceof AppError ? err.details : undefined,
     };
     callLog.statusHistory.push({
@@ -1698,8 +1709,10 @@ export async function executeScheduledCallJob(callScheduleId: string): Promise<v
         callPurpose: `Scheduled ${job.callType.replace(/_/g, ' ').toLowerCase()}`,
         callStatus: 'LANGUAGE_UNAVAILABLE',
         outcome: 'FAILED',
+        errorCategory: 'LANGUAGE_UNAVAILABLE',
         failureReason: reason,
         lastStatusUpdateAt: now,
+        voiceCallingConsentGranted: true,
         recordingConsentGranted,
         audioRecordingConsentGranted: recordingConsentGranted,
         transcriptConsentGranted,
@@ -1719,6 +1732,8 @@ export async function executeScheduledCallJob(callScheduleId: string): Promise<v
         medicineConfirmed: 'UNCONFIRMED',
         aiSummary: reason,
       });
+      job.errorCategory = 'LANGUAGE_UNAVAILABLE';
+      job.nonRetryable = true;
       await skipClaimedJob(reason, 'FAILED');
       return;
     }
@@ -1810,6 +1825,7 @@ export async function executeScheduledCallJob(callScheduleId: string): Promise<v
         medicineId: String(medicine._id),
         medicineName: medicine.name,
         dosage: medicine.dosage,
+        doseNumber: typeof dose.slotIndex === 'number' ? dose.slotIndex + 1 : 1,
         foodInstruction: dose.foodInstruction,
         associatedMeal: dose.associatedMeal,
         slotLabel: dose.slotLabel,
@@ -1851,39 +1867,96 @@ export async function executeScheduledCallJob(callScheduleId: string): Promise<v
       await job.save();
       return;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Sarvam outbound dispatch failed';
+      const classified = classifySarvamSchedulerError(err);
+      const msg = classified.detail;
       const failedAt = new Date();
-      callLog.callStatus = 'FAILED';
+      const isLangUnavailable = classified.category === 'LANGUAGE_UNAVAILABLE';
+
+      callLog.callStatus = isLangUnavailable ? 'LANGUAGE_UNAVAILABLE' : 'FAILED';
       callLog.outcome = 'FAILED';
-      callLog.sarvamStatus = 'failed';
+      callLog.sarvamStatus = isLangUnavailable ? 'language_unavailable' : 'failed';
+      callLog.providerStatusRaw = isLangUnavailable ? 'LANGUAGE_UNAVAILABLE' : classified.category;
+      callLog.errorCategory = classified.category;
+      if (isLangUnavailable) {
+        callLog.languageStatus = 'LANGUAGE_UNAVAILABLE';
+      }
       callLog.endedAt = failedAt;
+      callLog.lastStatusUpdateAt = failedAt;
       callLog.failureReason = msg.slice(0, 1000);
+      callLog.providerResponseMeta = {
+        error: msg.slice(0, 500),
+        code: err instanceof AppError ? err.code : 'SARVAM_PROVIDER_ERROR',
+        errorCategory: classified.category,
+        nonRetryable: classified.nonRetryable,
+        details: err instanceof AppError ? err.details : undefined,
+      };
       callLog.statusHistory.push({
-        status: 'FAILED',
+        status: callLog.callStatus,
         timestamp: failedAt,
         source: 'PROVIDER_API',
-        note: msg.slice(0, 400),
+        note: `[${classified.category}] ${msg.slice(0, 350)}`,
       });
-      callLog.aiSummary = `Live Sarvam outbound dispatch failed: ${msg}`;
+      callLog.aiSummary = isLangUnavailable
+        ? `Scheduled call aborted: requested language unavailable (${msg})`
+        : `Scheduled Sarvam outbound call failed (${classified.category}): ${msg}`;
       await callLog.save();
 
+      // Always keep DoseInstance as UNCONFIRMED (never assume taken on failure)
       await DoseInstance.findOneAndUpdate(
         { _id: dose._id, status: { $in: ['PENDING', 'CALLBACK_REQUESTED'] } },
         { status: 'UNCONFIRMED' }
       );
 
+      logger.error('Scheduled Sarvam outbound call failed', {
+        callScheduleId: String(job._id),
+        callLogId: String(callLog._id),
+        errorCategory: classified.category,
+        nonRetryable: classified.nonRetryable,
+        attemptNumber: job.attemptNumber,
+        maxAttempts: job.maxAttempts,
+        reason: msg.slice(0, 300),
+      });
+
+      // Transient PROVIDER_ERROR only: allow bounded retry if attempts remain; never retry config/lang/auth failures
+      if (!classified.nonRetryable && job.attemptNumber < job.maxAttempts) {
+        const retryAt = new Date(Date.now() + 60 * 1000);
+        job.attemptNumber += 1;
+        job.status = 'QUEUED';
+        job.errorCategory = classified.category;
+        job.nonRetryable = false;
+        job.scheduledFor = retryAt;
+        job.dispatchedAt = undefined;
+        job.failureReason = `[${classified.category}] Retry #${job.attemptNumber} scheduled: ${msg.slice(
+          0,
+          300
+        )}`;
+        await job.save();
+        await enqueueCallJob(
+          {
+            callScheduleId: String(job._id),
+            jobKey: `${job.jobKey}_retry_${job.attemptNumber}`,
+            familyId: String(job.familyId),
+            callType: job.callType,
+          },
+          retryAt
+        ).catch(() => undefined);
+        return;
+      }
+
       if (job.callbackId) {
         await Callback.findByIdAndUpdate(job.callbackId, {
           status: 'FAILED',
           resultingCallLogId: callLog._id,
-          validationNotes: `Outbound dispatch failed: ${msg.slice(0, 300)}`,
+          validationNotes: `[${classified.category}] Outbound dispatch failed: ${msg.slice(0, 300)}`,
         });
       }
 
       job.status = 'FAILED';
-      job.failureReason = msg;
+      job.errorCategory = classified.category;
+      job.nonRetryable = classified.nonRetryable;
+      job.failureReason = `[${classified.category}] ${msg}`;
       await job.save();
-      throw err;
+      return;
     }
   }
 

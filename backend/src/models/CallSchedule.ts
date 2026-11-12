@@ -1,7 +1,9 @@
 import mongoose, { Document, Schema, Types } from 'mongoose';
 import {
+  CALL_ERROR_CATEGORIES,
   CALL_SCHEDULE_STATUSES,
   CALL_TYPES,
+  CallErrorCategory,
   CallScheduleStatus,
   CallType,
 } from '../constants/statuses';
@@ -21,6 +23,8 @@ export interface ICallSchedule extends Document {
   dispatchedAt?: Date;
   completedAt?: Date;
   failureReason?: string;
+  errorCategory?: CallErrorCategory;
+  nonRetryable?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -56,6 +60,8 @@ const callScheduleSchema = new Schema<ICallSchedule>(
     dispatchedAt: { type: Date },
     completedAt: { type: Date },
     failureReason: { type: String, trim: true },
+    errorCategory: { type: String, enum: CALL_ERROR_CATEGORIES },
+    nonRetryable: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

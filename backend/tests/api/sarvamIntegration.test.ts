@@ -238,7 +238,16 @@ describe('Sarvam Instant Outbound & Webhook End-to-End Integration Tests (Mocked
     });
     expect(reqPayload.app_config.app_overrides?.initial_language_name).toBe('Telugu');
     expect(reqPayload.app_config.app_overrides?.initial_bot_message).toContain('నమస్కారం');
-    expect(reqPayload.app_config.agent_variables?.language_code).toBe('te');
+    expect(reqPayload.app_config.agent_variables).toEqual({
+      call_purpose: 'Scheduled callback',
+      doctor_instructions: 'Take morning & night after food',
+      dosage: '40mg',
+      dose_number: '1',
+      food_instruction: 'AFTER_FOOD',
+      meal: 'BREAKFAST',
+      medicine_name: 'Telmisartan',
+      user_name: 'Padma Reddy',
+    });
     expect(reqPayload.user_config.user_phone_number).toBe('+919876500010');
     expect(reqPayload.webhook_config.url).toBe(
       `https://carevoice-test.example/api/voice-agent/webhook/sarvam/${TEST_WEBHOOK_TOKEN}`
@@ -246,6 +255,8 @@ describe('Sarvam Instant Outbound & Webhook End-to-End Integration Tests (Mocked
     expect(reqPayload.webhook_config.metadata).toMatchObject({
       patient_id: memberId,
       dose_id: doseIds[0],
+      language: 'te-IN',
+      preferred_language_name: 'Telugu',
     });
 
     const storedLog = await CallLog.findOne({ attemptId: 'sarvam_attempt_live_001' }).lean();
@@ -529,5 +540,82 @@ describe('Sarvam Instant Outbound & Webhook End-to-End Integration Tests (Mocked
       status: 'QUEUED',
     }).lean();
     expect(queuedCbJob).toBeTruthy();
+  });
+
+  it('classifies scheduled Sarvam HTTP 422 agent-variable errors as CONFIGURATION_ERROR without retrying infinitely and recovers jobs after restart', async () => {
+    const sampleDose = await DoseInstance.findById(doseIds[1]).lean();
+    expect(sampleDose).toBeTruthy();
+
+    await DoseInstance.updateOne({ _id: doseIds[1] }, { $set: { status: 'PENDING' } });
+
+    const configFailJob = await CallSchedule.create({
+      familyId: sampleDose?.familyId,
+      familyMemberId: memberId,
+      medicineId,
+      doseInstanceId: doseIds[1],
+      callType: 'CALLBACK',
+      scheduledFor: new Date(),
+      status: 'QUEUED',
+      jobKey: `test-config-err-${Date.now()}`,
+      attemptNumber: 1,
+      maxAttempts: 3,
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        text: async () =>
+          JSON.stringify({
+            detail:
+              "Invalid Parameter – Agent variables not found in agent variables of app 'Conversatio-a7e64173-3c11'. Rejected variables include: slot_label, associated_meal, voice_gender, patient_name, dose_id, patient_id, language_code, language_bcp47, preferred_language, recommended_voice, language_directive, call_type, language_name, call_log_id",
+          }),
+      })
+    );
+
+    // Must settle cleanly (not rethrow to trigger infinite queue retries)
+    await expect(executeScheduledCallJob(String(configFailJob._id))).resolves.toBeUndefined();
+
+    const updatedJob = await CallSchedule.findById(configFailJob._id).lean();
+    expect(updatedJob?.status).toBe('FAILED');
+    expect(updatedJob?.errorCategory).toBe('CONFIGURATION_ERROR');
+    expect(updatedJob?.nonRetryable).toBe(true);
+    expect(updatedJob?.attemptNumber).toBe(1);
+
+    const errCallLog = await CallLog.findOne({ callScheduleId: configFailJob._id }).lean();
+    expect(errCallLog?.callStatus).toBe('FAILED');
+    expect(errCallLog?.errorCategory).toBe('CONFIGURATION_ERROR');
+    expect(errCallLog?.failureReason).toContain('Agent variables not found');
+
+    // Dose must remain UNCONFIRMED (never marked TAKEN)
+    const doseAfterFail = await DoseInstance.findById(doseIds[1]).lean();
+    expect(doseAfterFail?.status).toBe('UNCONFIRMED');
+
+    // Restart recovery: stale pre-CallLog DISPATCHED job recovers cleanly to QUEUED, while nonRetryable FAILED is untouched
+    const stalePreDispatch = await CallSchedule.create({
+      familyId: sampleDose?.familyId,
+      familyMemberId: memberId,
+      medicineId,
+      doseInstanceId: doseIds[1],
+      callType: 'MEDICINE_REMINDER',
+      scheduledFor: new Date(Date.now() - 5 * 60 * 1000),
+      dispatchedAt: new Date(Date.now() - 4 * 60 * 1000),
+      status: 'DISPATCHED',
+      jobKey: `test-stale-recovery-${Date.now()}`,
+      attemptNumber: 1,
+      maxAttempts: 2,
+    });
+
+    const { recoverScheduledCallsOnStartup } = await import('../../src/queues/callWorker');
+    const recoveryStats = await recoverScheduledCallsOnStartup(new Date());
+    expect(recoveryStats.requeuedStale).toBeGreaterThanOrEqual(1);
+
+    const recoveredStale = await CallSchedule.findById(stalePreDispatch._id).lean();
+    expect(recoveredStale?.status).toBe('QUEUED');
+
+    const nonRetryableAfterRestart = await CallSchedule.findById(configFailJob._id).lean();
+    expect(nonRetryableAfterRestart?.status).toBe('FAILED');
+    expect(nonRetryableAfterRestart?.nonRetryable).toBe(true);
   });
 });

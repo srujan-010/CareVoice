@@ -10,6 +10,7 @@ import {
   getLanguageMeta,
   tryGetSupportedLanguage,
 } from '../../constants/languages';
+import { CallErrorCategory } from '../../constants/statuses';
 import { AppError } from '../../utils/errors';
 import { logger } from '../../utils/logger';
 import { normalizeAndValidateE164 } from '../../utils/phone';
@@ -33,8 +34,218 @@ export type SarvamAuthCategory =
   | 'DEPLOYMENT_INACTIVE'
   | 'DEPLOYMENT_MISMATCH'
   | 'LANGUAGE_UNSUPPORTED'
+  | 'CONFIGURATION_ERROR'
   | 'NETWORK_ERROR'
   | 'UPSTREAM_ERROR';
+
+/**
+ * Exact 8 input variables currently configured on the Sarvam "Family Medicine Assistant"
+ * Variables page (live committed baseline — prevents HTTP 422 unknown-variable rejections).
+ */
+export const SARVAM_CANONICAL_COMMITTED_VARIABLES = [
+  'call_purpose',
+  'doctor_instructions',
+  'dosage',
+  'dose_number',
+  'food_instruction',
+  'meal',
+  'medicine_name',
+  'user_name',
+] as const;
+
+/**
+ * Minimum 5 additional variables to add on Sarvam Canvas -> Variables to expose
+ * full language steering & meal slot context to the prompt alongside app_overrides.
+ */
+export const SARVAM_CANONICAL_ADDITIONAL_VARIABLES = [
+  'language_name',
+  'language_code',
+  'language_directive',
+  'associated_meal',
+  'slot_label',
+] as const;
+
+export const CAREVOICE_CANONICAL_AGENT_VARIABLE_KEYS = [
+  ...SARVAM_CANONICAL_COMMITTED_VARIABLES,
+  ...SARVAM_CANONICAL_ADDITIONAL_VARIABLES,
+] as const;
+
+/**
+ * Keys that MUST NEVER be sent inside Sarvam `app_config.agent_variables`:
+ * - Internal CareVoice DB identifiers (stored in CareVoice & private webhook_config.metadata only)
+ * - Duplicate aliases already represented by canonical keys (`user_name`, `language_name`, `call_purpose`)
+ * - Unsupported voice-persona overrides (Sarvam configures per-language voices in Canvas -> Speakers & voice)
+ */
+export const CAREVOICE_INTERNAL_ONLY_VARIABLES = [
+  'patient_id',
+  'dose_id',
+  'call_log_id',
+  'family_id',
+  'patient_name',
+  'preferred_language',
+  'language_bcp47',
+  'call_type',
+  'voice_gender',
+  'recommended_voice',
+] as const;
+
+export type CareVoiceCanonicalVariableKey =
+  (typeof CAREVOICE_CANONICAL_AGENT_VARIABLE_KEYS)[number];
+
+const CANONICAL_VARIABLE_KEY_SET = new Set<string>(CAREVOICE_CANONICAL_AGENT_VARIABLE_KEYS);
+const INTERNAL_ONLY_VARIABLE_SET = new Set<string>(CAREVOICE_INTERNAL_ONLY_VARIABLES);
+
+export function parseConfiguredAllowedAgentVariables(
+  raw = env.SARVAM_ALLOWED_AGENT_VARIABLES,
+  profile: 'committed' | 'extended' = env.SARVAM_AGENT_VARIABLE_PROFILE
+): string[] {
+  const trimmed = (raw || '').trim();
+  if (trimmed) {
+    if (trimmed.toLowerCase() === 'none') return [];
+    return Array.from(
+      new Set(
+        trimmed
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
+    );
+  }
+  return profile === 'extended'
+    ? [...CAREVOICE_CANONICAL_AGENT_VARIABLE_KEYS]
+    : [...SARVAM_CANONICAL_COMMITTED_VARIABLES];
+}
+
+export function parseAgentVariableAliasMap(
+  raw = env.SARVAM_AGENT_VARIABLE_MAP
+): Record<string, CareVoiceCanonicalVariableKey> {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new AppError(
+      'SARVAM_AGENT_VARIABLE_MAP must be valid JSON mapping Sarvam variable names to CareVoice canonical keys',
+      422,
+      'CONFIGURATION_ERROR',
+      { errorCategory: 'CONFIGURATION_ERROR' }
+    );
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new AppError(
+      'SARVAM_AGENT_VARIABLE_MAP must be a JSON object of { "<sarvamKey>": "<canonicalKey>" }',
+      422,
+      'CONFIGURATION_ERROR',
+      { errorCategory: 'CONFIGURATION_ERROR' }
+    );
+  }
+
+  const out: Record<string, CareVoiceCanonicalVariableKey> = {};
+  for (const [sarvamKey, canonicalKey] of Object.entries(parsed as Record<string, unknown>)) {
+    const cleanSarvamKey = sarvamKey.trim();
+    const cleanCanonical = typeof canonicalKey === 'string' ? canonicalKey.trim() : '';
+    if (!cleanSarvamKey || !CANONICAL_VARIABLE_KEY_SET.has(cleanCanonical)) {
+      throw new AppError(
+        `Invalid SARVAM_AGENT_VARIABLE_MAP entry "${sarvamKey}" -> "${String(
+          canonicalKey
+        )}". Supported CareVoice canonical keys: ${CAREVOICE_CANONICAL_AGENT_VARIABLE_KEYS.join(', ')}`,
+        422,
+        'CONFIGURATION_ERROR',
+        {
+          errorCategory: 'CONFIGURATION_ERROR',
+          invalidVariables: [cleanSarvamKey || sarvamKey],
+        }
+      );
+    }
+    out[cleanSarvamKey] = cleanCanonical as CareVoiceCanonicalVariableKey;
+  }
+  return out;
+}
+
+export function resolveSarvamAgentVariables(
+  canonicalValues: Record<CareVoiceCanonicalVariableKey, string>,
+  options?: {
+    allowedVariablesCsv?: string;
+    profile?: 'committed' | 'extended';
+    aliasMapJson?: string;
+    extraAgentVariables?: Record<string, string>;
+  }
+): Record<string, string> | undefined {
+  const allowedKeys = parseConfiguredAllowedAgentVariables(
+    options?.allowedVariablesCsv ?? env.SARVAM_ALLOWED_AGENT_VARIABLES,
+    options?.profile ?? env.SARVAM_AGENT_VARIABLE_PROFILE
+  );
+  const aliasMap = parseAgentVariableAliasMap(
+    options?.aliasMapJson ?? env.SARVAM_AGENT_VARIABLE_MAP
+  );
+  const allowedSet = new Set(allowedKeys);
+  const extraVars = options?.extraAgentVariables ?? {};
+
+  // Reject any explicit override/dynamic variable that is internal-only, duplicate, or not in configured Sarvam schema BEFORE dialing
+  const disallowedExtras = Object.keys(extraVars).filter(
+    (key) => INTERNAL_ONLY_VARIABLE_SET.has(key) || !allowedSet.has(key)
+  );
+  if (disallowedExtras.length > 0) {
+    throw new AppError(
+      `Attempted to send unconfigured or internal-only Sarvam agent variable(s) [${disallowedExtras.join(
+        ', '
+      )}]. Allowed schema: [${allowedKeys.join(', ') || 'none'}]`,
+      422,
+      'CONFIGURATION_ERROR',
+      {
+        errorCategory: 'CONFIGURATION_ERROR',
+        invalidVariables: disallowedExtras,
+        allowedVariables: allowedKeys,
+      }
+    );
+  }
+
+  if (allowedKeys.length === 0) {
+    return undefined;
+  }
+
+  const resolved: Record<string, string> = {};
+  const invalidSchemaKeys: string[] = [];
+
+  for (const sarvamKey of allowedKeys) {
+    if (INTERNAL_ONLY_VARIABLE_SET.has(sarvamKey) && !aliasMap[sarvamKey]) {
+      invalidSchemaKeys.push(sarvamKey);
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(extraVars, sarvamKey)) {
+      resolved[sarvamKey] = String(extraVars[sarvamKey] ?? '');
+      continue;
+    }
+    const mappedCanonicalKey =
+      aliasMap[sarvamKey] ??
+      (CANONICAL_VARIABLE_KEY_SET.has(sarvamKey)
+        ? (sarvamKey as CareVoiceCanonicalVariableKey)
+        : undefined);
+    if (!mappedCanonicalKey) {
+      invalidSchemaKeys.push(sarvamKey);
+      continue;
+    }
+    resolved[sarvamKey] = canonicalValues[mappedCanonicalKey] ?? '';
+  }
+
+  if (invalidSchemaKeys.length > 0) {
+    throw new AppError(
+      `Invalid or internal-only key(s) in configured Sarvam agent variable schema: [${invalidSchemaKeys.join(
+        ', '
+      )}]. Internal DB IDs (patient_id, dose_id, call_log_id), duplicate aliases (patient_name, preferred_language), and unsupported voice keys (voice_gender) must not be sent as agent variables.`,
+      422,
+      'CONFIGURATION_ERROR',
+      {
+        errorCategory: 'CONFIGURATION_ERROR',
+        invalidVariables: invalidSchemaKeys,
+        supportedCanonicalVariables: [...CAREVOICE_CANONICAL_AGENT_VARIABLE_KEYS],
+      }
+    );
+  }
+
+  return resolved;
+}
 
 export interface SarvamOutboundRequestPayload {
   app_config: {
@@ -162,6 +373,8 @@ export interface SarvamWorkspaceDiscoverySummary {
   configuredPhoneMasked: string;
   analyticsAppCheckStatus?: number;
   analyticsAppCheckDetail?: string;
+  observedAgentVariables?: string[];
+  configuredAllowedAgentVariables?: string[];
   endpointsChecked: string[];
   discoveredApps: SarvamDiscoveredAppSummary[];
   discoveredConnections: SarvamDiscoveredConnectionSummary[];
@@ -375,6 +588,7 @@ function classifySarvamHttpFailure(
   extractedSummary?: string
 ): {
   authCategory: SarvamAuthCategory;
+  errorCategory: CallErrorCategory;
   diagnosticHint: string;
 } {
   const detailText = extractedSummary || '';
@@ -383,12 +597,14 @@ function classifySarvamHttpFailure(
     if (/invalid api key format|provide a bearer token or x-api-key|api key required/i.test(detailText)) {
       return {
         authCategory: 'INVALID_API_KEY_FORMAT',
+        errorCategory: 'AUTHENTICATION_ERROR',
         diagnosticHint:
           'Sarvam Voice Agents (apps.sarvam.ai) rejected SARVAM_API_KEY at X-API-Key format validation before checking workspace permissions. Generate a Voice Agents Workspace API Key in https://apps.sarvam.ai -> select workspace -> Settings -> API Key (do NOT use a dashboard.sarvam.ai Model API subscription key), and store the raw key without quotes or spaces.',
       };
     }
     return {
       authCategory: 'UNAUTHORIZED_INVALID_OR_REVOKED_KEY',
+      errorCategory: 'AUTHENTICATION_ERROR',
       diagnosticHint:
         'Sarvam returned HTTP 401 Unauthorized. Confirm SARVAM_API_KEY is active (not expired or revoked), has no accidental quotes/whitespace, and was created for the configured workspace in https://apps.sarvam.ai -> Settings -> API Key.',
     };
@@ -397,6 +613,7 @@ function classifySarvamHttpFailure(
   if (statusCode === 403) {
     return {
       authCategory: 'INSUFFICIENT_PERMISSIONS',
+      errorCategory: 'AUTHENTICATION_ERROR',
       diagnosticHint:
         'Sarvam returned HTTP 403 Forbidden. The API key was recognized, but lacks permissions for the configured SARVAM_ORG_ID / SARVAM_WORKSPACE_ID. Generate a Workspace API key inside the target workspace in https://apps.sarvam.ai.',
     };
@@ -406,33 +623,59 @@ function classifySarvamHttpFailure(
     if (/\bapp\b.*not found|\bagent\b.*not found/i.test(detailText)) {
       return {
         authCategory: 'APP_NOT_FOUND_IN_WORKSPACE',
+        errorCategory: 'CONFIGURATION_ERROR',
         diagnosticHint:
           'Sarvam returned HTTP 404 because SARVAM_AGENT_ID does not match a committed/accessible agent inside the configured SARVAM_ORG_ID + SARVAM_WORKSPACE_ID. Do not copy the browser URL slug: open the agent in https://apps.sarvam.ai, click "···" -> "Copy agent ID", ensure the agent version is Committed (not Draft), and update SARVAM_AGENT_ID & SARVAM_AGENT_VERSION.',
       };
     }
     return {
       authCategory: 'WORKSPACE_OR_ORG_NOT_FOUND',
+      errorCategory: 'CONFIGURATION_ERROR',
       diagnosticHint:
         'Sarvam returned HTTP 404 Not Found. Confirm SARVAM_ORG_ID and SARVAM_WORKSPACE_ID belong to the same Sarvam account/workspace.',
     };
   }
 
   if (statusCode === 400 || statusCode === 422) {
+    // IMPORTANT: Check Agent Variable / Parameter schema mismatch BEFORE language checks so
+    // rejected variable names like "language_name" are NEVER misclassified as LANGUAGE_UNSUPPORTED.
     if (
-      /initial_language_name|language.*not supported|unsupported language|language_name/i.test(
+      /agent variables?\s+not found|not found in agent variables|invalid parameter|unknown variable|missing.*required.*variable|extra inputs are not permitted|field required/i.test(
+        detailText
+      )
+    ) {
+      return {
+        authCategory: 'CONFIGURATION_ERROR',
+        errorCategory: 'CONFIGURATION_ERROR',
+        diagnosticHint:
+          'Sarvam rejected custom agent_variables or outbound parameters not present in the committed Sarvam agent schema (HTTP 400/422). Ensure SARVAM_ALLOWED_AGENT_VARIABLES matches ONLY the variables defined & committed in Sarvam Canvas for SARVAM_AGENT_VERSION (or leave SARVAM_ALLOWED_AGENT_VARIABLES empty so CareVoice uses app_overrides + webhook_config.metadata without unconfigured agent variables).',
+      };
+    }
+
+    if (
+      /\binitial_language_name\b|\bunsupported language\b|\blanguage\b.*\b(?:not supported|not enabled|unavailable)\b/i.test(
         detailText
       )
     ) {
       return {
         authCategory: 'LANGUAGE_UNSUPPORTED',
+        errorCategory: 'LANGUAGE_UNAVAILABLE',
         diagnosticHint:
           'Sarvam rejected the requested initial_language_name. Enable this language (e.g., Telugu) and assign a per-language voice persona on Sarvam Canvas -> Settings -> Language personalisation & Speakers & voice, or obtain caregiver permission for an explicit fallback language.',
       };
     }
+
+    return {
+      authCategory: 'CONFIGURATION_ERROR',
+      errorCategory: 'CONFIGURATION_ERROR',
+      diagnosticHint:
+        'Sarvam returned HTTP 400/422 validation error. Verify SARVAM_AGENT_VERSION, SARVAM_CONNECTION_ID, SARVAM_PHONE_NUMBER, and agent variables schema.',
+    };
   }
 
   return {
     authCategory: 'UPSTREAM_ERROR',
+    errorCategory: 'PROVIDER_ERROR',
     diagnosticHint:
       'Sarvam Voice Agents API returned a non-2xx error. Verify agent ID, version, Vobiz connection ID, and Sarvam API service status.',
   };
@@ -570,7 +813,7 @@ export class SarvamVoiceProvider implements IVoiceProvider {
 
   public getTranscriptEndpointUrl(interactionId: string): string {
     const trimmed = interactionId.trim();
-    if (!/^[0-9]{8}\/[A-Za-z0-9._:-]+$/.test(trimmed)) {
+    if (trimmed.includes('..') || !/^(?:[0-9]{8}\/)?[A-Za-z0-9._:-]+$/.test(trimmed)) {
       throw new AppError(
         'Invalid Sarvam interaction_id format for transcript retrieval',
         400,
@@ -598,9 +841,21 @@ export class SarvamVoiceProvider implements IVoiceProvider {
     };
   }
 
+  public getConfiguredAgentVariableSummary() {
+    return {
+      profile: env.SARVAM_AGENT_VARIABLE_PROFILE,
+      allowedAgentVariables: parseConfiguredAllowedAgentVariables(),
+      committedVariables: [...SARVAM_CANONICAL_COMMITTED_VARIABLES],
+      additionalCanvasVariables: [...SARVAM_CANONICAL_ADDITIONAL_VARIABLES],
+      internalOnlyVariables: [...CAREVOICE_INTERNAL_ONLY_VARIABLES],
+      variableAliasMap: parseAgentVariableAliasMap(),
+      supportedCanonicalVariables: [...CAREVOICE_CANONICAL_AGENT_VARIABLE_KEYS],
+    };
+  }
+
   public getRecordingEndpointUrl(interactionId: string): string {
     const trimmed = interactionId.trim();
-    if (!/^[0-9]{8}\/[A-Za-z0-9._:-]+$/.test(trimmed)) {
+    if (trimmed.includes('..') || !/^(?:[0-9]{8}\/)?[A-Za-z0-9._:-]+$/.test(trimmed)) {
       throw new AppError(
         'Invalid Sarvam interaction_id format for recording retrieval',
         400,
@@ -902,6 +1157,7 @@ export class SarvamVoiceProvider implements IVoiceProvider {
 
     endpointsChecked.push('analytics-interactions');
     let analyticsTotal = 0;
+    const observedVariableKeys = new Set<string>();
     if (analyticsRes.ok && analyticsRes.json && typeof analyticsRes.json === 'object') {
       const rec = analyticsRes.json as {
         total?: number;
@@ -909,6 +1165,7 @@ export class SarvamVoiceProvider implements IVoiceProvider {
           app_version?: number;
           deployment_id?: string | null;
           bot_contact_identifier?: string | null;
+          agent_variables?: Record<string, unknown> | null;
         }>;
       };
       const items = Array.isArray(rec.items) ? rec.items : [];
@@ -923,6 +1180,11 @@ export class SarvamVoiceProvider implements IVoiceProvider {
             if (item?.deployment_id) entry.deploymentIds.add(item.deployment_id);
             if (item?.bot_contact_identifier) {
               entry.rawPhones.add(item.bot_contact_identifier.trim());
+            }
+            if (item?.agent_variables && typeof item.agent_variables === 'object') {
+              for (const k of Object.keys(item.agent_variables)) {
+                observedVariableKeys.add(k);
+              }
             }
           }
         }
@@ -982,6 +1244,9 @@ export class SarvamVoiceProvider implements IVoiceProvider {
         analyticsAppCheckDetail: analyticsRes.errorSummary
           ? redactSecrets(analyticsRes.errorSummary)
           : undefined,
+        observedAgentVariables:
+          observedVariableKeys.size > 0 ? Array.from(observedVariableKeys).sort() : undefined,
+        configuredAllowedAgentVariables: parseConfiguredAllowedAgentVariables(),
         endpointsChecked,
         discoveredApps,
         discoveredConnections,
@@ -1368,7 +1633,8 @@ export class SarvamVoiceProvider implements IVoiceProvider {
       throw new AppError(
         'Sarvam workspace, agent, or connection IDs are incomplete',
         503,
-        'TELEPHONY_DISABLED'
+        'TELEPHONY_DISABLED',
+        { errorCategory: 'CONFIGURATION_ERROR' }
       );
     }
 
@@ -1386,7 +1652,8 @@ export class SarvamVoiceProvider implements IVoiceProvider {
       throw new AppError(
         'SARVAM_AGENT_VERSION must resolve to a positive integer app_version',
         500,
-        'INVALID_SARVAM_AGENT_VERSION'
+        'INVALID_SARVAM_AGENT_VERSION',
+        { errorCategory: 'CONFIGURATION_ERROR' }
       );
     }
 
@@ -1400,6 +1667,7 @@ export class SarvamVoiceProvider implements IVoiceProvider {
         422,
         'LANGUAGE_FALLBACK_REQUIRED',
         {
+          errorCategory: 'LANGUAGE_UNAVAILABLE',
           requestedLanguage: context.languageCode,
           availableFallbackLanguages: langCheck.availableFallbackLanguages,
           requiresFallbackPermission: true,
@@ -1409,8 +1677,6 @@ export class SarvamVoiceProvider implements IVoiceProvider {
 
     const langMeta = langCheck.language;
     const initialLanguageName = langMeta.sarvamInitialLanguageName || langMeta.name;
-    const recommendedVoice =
-      langMeta.recommendedVoices[context.voiceGender] || langMeta.recommendedVoices.FEMALE;
     const initialBotMessage = buildLocalizedInitialGreeting({
       languageCode: langMeta.code,
       patientName: context.patientName,
@@ -1422,6 +1688,28 @@ export class SarvamVoiceProvider implements IVoiceProvider {
     const transcriptConsent =
       context.transcriptConsentGranted ?? context.recordingConsentGranted;
 
+    const canonicalVariables: Record<CareVoiceCanonicalVariableKey, string> = {
+      call_purpose: context.callPurpose || context.callType,
+      doctor_instructions:
+        context.prescribedInstructions ||
+        `${context.foodInstruction} (${context.associatedMeal})`.replace(/_/g, ' '),
+      dosage: context.dosage,
+      dose_number: String(context.doseNumber ?? 1),
+      food_instruction: context.foodInstruction,
+      meal: context.associatedMeal,
+      medicine_name: context.medicineName,
+      user_name: context.patientName,
+      language_name: initialLanguageName,
+      language_code: langMeta.code,
+      language_directive: `Conduct the entire call politely and strictly in ${initialLanguageName} (${langMeta.bcp47}). Do NOT switch to Hindi or any other language unless the patient explicitly asks.`,
+      associated_meal: context.associatedMeal,
+      slot_label: context.slotLabel || '',
+    };
+
+    const resolvedAgentVariables = resolveSarvamAgentVariables(canonicalVariables, {
+      extraAgentVariables: context.extraAgentVariables,
+    });
+
     const requestBody: SarvamOutboundRequestPayload = {
       app_config: {
         app_id: env.SARVAM_AGENT_ID,
@@ -1430,26 +1718,9 @@ export class SarvamVoiceProvider implements IVoiceProvider {
           connection_id: env.SARVAM_CONNECTION_ID,
           agent_phone_number: agentPhoneNumber,
         },
-        agent_variables: {
-          patient_name: context.patientName,
-          preferred_language: initialLanguageName,
-          language_name: initialLanguageName,
-          language_code: langMeta.code,
-          language_bcp47: langMeta.bcp47,
-          language_directive: `Conduct the entire call politely and clearly in ${initialLanguageName} (${langMeta.bcp47}). Do NOT switch to Hindi or any other language unless the patient explicitly asks.`,
-          voice_gender: context.voiceGender,
-          recommended_voice: recommendedVoice,
-          medicine_name: context.medicineName,
-          dosage: context.dosage,
-          food_instruction: context.foodInstruction,
-          associated_meal: context.associatedMeal,
-          slot_label: context.slotLabel || '',
-          call_type: context.callType,
-          call_purpose: context.callPurpose || context.callType,
-          patient_id: context.familyMemberId,
-          dose_id: context.doseInstanceId,
-          call_log_id: context.callLogId,
-        },
+        ...(resolvedAgentVariables && Object.keys(resolvedAgentVariables).length > 0
+          ? { agent_variables: resolvedAgentVariables }
+          : {}),
         app_overrides: {
           initial_language_name: initialLanguageName,
           initial_bot_message: initialBotMessage,
@@ -1516,7 +1787,8 @@ export class SarvamVoiceProvider implements IVoiceProvider {
       throw new AppError(
         `Sarvam live telephony is disabled or missing configuration: ${status.missingFields.join(', ')}`,
         503,
-        'TELEPHONY_DISABLED'
+        'TELEPHONY_DISABLED',
+        { errorCategory: 'CONFIGURATION_ERROR' }
       );
     }
 
@@ -1525,7 +1797,8 @@ export class SarvamVoiceProvider implements IVoiceProvider {
       throw new AppError(
         `Sarvam API credential format invalid: ${credDiag.issues.join(' ')}`,
         503,
-        'SARVAM_CREDENTIAL_SYNTAX_ERROR'
+        'SARVAM_CREDENTIAL_SYNTAX_ERROR',
+        { errorCategory: 'AUTHENTICATION_ERROR' }
       );
     }
 
@@ -1536,9 +1809,10 @@ export class SarvamVoiceProvider implements IVoiceProvider {
       callLogId: context.callLogId,
       patientId: context.familyMemberId,
       doseId: context.doseInstanceId,
-      languageCode: requestBody.app_config.agent_variables?.language_code || context.languageCode,
-      languageBcp47: requestBody.app_config.agent_variables?.language_bcp47 || context.languageBcp47,
+      languageCode: context.languageCode,
+      languageBcp47: context.languageBcp47,
       initialLanguageName: requestBody.app_config.app_overrides?.initial_language_name,
+      agentVariableKeys: Object.keys(requestBody.app_config.agent_variables || {}),
       callType: context.callType,
       appVersion: requestBody.app_config.app_version,
       hasWebhookConfig: Boolean(requestBody.webhook_config),
@@ -1567,7 +1841,8 @@ export class SarvamVoiceProvider implements IVoiceProvider {
       throw new AppError(
         `Unable to connect to Sarvam outbound telephony API: ${msg}`,
         502,
-        'SARVAM_NETWORK_ERROR'
+        'SARVAM_NETWORK_ERROR',
+        { errorCategory: 'PROVIDER_ERROR' }
       );
     }
 
@@ -1584,6 +1859,7 @@ export class SarvamVoiceProvider implements IVoiceProvider {
       logger.warn('Sarvam outbound API returned non-2xx status', {
         statusCode: response.status,
         authCategory: classification.authCategory,
+        errorCategory: classification.errorCategory,
         callLogId: context.callLogId,
         patientId: context.familyMemberId,
         doseId: context.doseInstanceId,
@@ -1603,6 +1879,7 @@ export class SarvamVoiceProvider implements IVoiceProvider {
           {
             upstreamStatus: response.status,
             authCategory: classification.authCategory,
+            errorCategory: 'LANGUAGE_UNAVAILABLE',
             detail: extracted.summary,
             diagnosticHint: classification.diagnosticHint,
             requestedLanguage: context.languageCode,
@@ -1623,6 +1900,7 @@ export class SarvamVoiceProvider implements IVoiceProvider {
         {
           upstreamStatus: response.status,
           authCategory: classification.authCategory,
+          errorCategory: classification.errorCategory,
           detail: extracted.summary,
           diagnosticHint: classification.diagnosticHint,
         }

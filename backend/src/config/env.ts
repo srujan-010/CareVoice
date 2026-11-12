@@ -91,6 +91,12 @@ const envSchema = z.object({
     'PUBLIC_WEBHOOK_BASE_URL must start with http:// or https://'
   ),
   SARVAM_ALLOWED_LANGUAGES: trimmedString(''),
+  SARVAM_AGENT_VARIABLE_PROFILE: z
+    .enum(['committed', 'extended'])
+    .optional()
+    .transform((val) => val ?? 'committed'),
+  SARVAM_ALLOWED_AGENT_VARIABLES: trimmedString(''),
+  SARVAM_AGENT_VARIABLE_MAP: trimmedString(''),
 
   WHATSAPP_ENABLED: boolFromEnv(false),
   WHATSAPP_PROVIDER_URL: trimmedString(''),

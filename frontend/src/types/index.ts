@@ -115,6 +115,8 @@ export interface SarvamWorkspaceDiscoverySummary {
   configuredPhoneMasked: string;
   analyticsAppCheckStatus?: number;
   analyticsAppCheckDetail?: string;
+  observedAgentVariables?: string[];
+  configuredAllowedAgentVariables?: string[];
   endpointsChecked: string[];
   discoveredApps: SarvamDiscoveredAppSummary[];
   discoveredConnections: SarvamDiscoveredConnectionSummary[];
@@ -155,6 +157,8 @@ export interface VoiceCallPreflight {
       | 'AGENT_UNVERIFIED_IN_WORKSPACE'
       | 'DEPLOYMENT_INACTIVE'
       | 'DEPLOYMENT_MISMATCH'
+      | 'LANGUAGE_UNSUPPORTED'
+      | 'CONFIGURATION_ERROR'
       | 'NETWORK_ERROR'
       | 'UPSTREAM_ERROR';
     matchedDeploymentId?: string;

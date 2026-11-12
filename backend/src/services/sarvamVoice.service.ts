@@ -19,11 +19,13 @@ import {
 } from '../config/env';
 import { tryGetSupportedLanguage } from '../constants/languages';
 import {
+  CallErrorCategory,
   CallLifecycleStatus,
   CallOutcome,
   MedicineConfirmationValue,
 } from '../constants/statuses';
 import { SarvamCallConnectivityStatus } from '../models/CallLog';
+import { AppError } from '../utils/errors';
 import { normalizeAndValidateE164 } from '../utils/phone';
 
 export { parseSarvamUtcTimestamp };
@@ -52,7 +54,7 @@ export function resolveSarvamLanguageCode(raw?: string | null): string | undefin
   const cleaned = cleanSarvamSentinel(raw);
   if (!cleaned) return undefined;
   const matched = tryGetSupportedLanguage(cleaned);
-  return matched ? matched.bcp47 : cleaned;
+  return matched ? matched.code : cleaned;
 }
 
 export interface SarvamTranscriptTurnInput {
@@ -766,5 +768,108 @@ export function evaluateSarvamAgentOutcome(
     aiSummary,
     safetyFlags,
     actualLanguageUsed,
+  };
+}
+
+export function classifySarvamSchedulerError(err: unknown): {
+  category: CallErrorCategory;
+  nonRetryable: boolean;
+  detail: string;
+} {
+  const detail = err instanceof Error ? err.message : String(err || 'Sarvam outbound dispatch failed');
+
+  if (err instanceof AppError) {
+    const details =
+      err.details && typeof err.details === 'object' && !Array.isArray(err.details)
+        ? (err.details as Record<string, unknown>)
+        : {};
+    const explicitCategory = details.errorCategory;
+    if (
+      explicitCategory === 'CONFIGURATION_ERROR' ||
+      explicitCategory === 'LANGUAGE_UNAVAILABLE' ||
+      explicitCategory === 'AUTHENTICATION_ERROR' ||
+      explicitCategory === 'PROVIDER_ERROR'
+    ) {
+      return {
+        category: explicitCategory,
+        nonRetryable: explicitCategory !== 'PROVIDER_ERROR',
+        detail,
+      };
+    }
+
+    const authCat = typeof details.authCategory === 'string' ? details.authCategory : '';
+    const upstreamStatus = typeof details.upstreamStatus === 'number' ? details.upstreamStatus : 0;
+
+    if (err.code === 'LANGUAGE_FALLBACK_REQUIRED' || authCat === 'LANGUAGE_UNSUPPORTED') {
+      return {
+        category: 'LANGUAGE_UNAVAILABLE',
+        nonRetryable: true,
+        detail,
+      };
+    }
+
+    if (
+      err.code === 'SARVAM_CREDENTIAL_SYNTAX_ERROR' ||
+      upstreamStatus === 401 ||
+      upstreamStatus === 403 ||
+      [
+        'KEY_SYNTAX_ERROR',
+        'INVALID_API_KEY_FORMAT',
+        'UNAUTHORIZED_INVALID_OR_REVOKED_KEY',
+        'INSUFFICIENT_PERMISSIONS',
+      ].includes(authCat)
+    ) {
+      return {
+        category: 'AUTHENTICATION_ERROR',
+        nonRetryable: true,
+        detail,
+      };
+    }
+
+    if (
+      err.code === 'CONFIGURATION_ERROR' ||
+      err.code === 'SARVAM_CONFIGURATION_ERROR' ||
+      err.code === 'INVALID_SARVAM_AGENT_VERSION' ||
+      err.code === 'WEBHOOK_AUTH_NOT_CONFIGURED' ||
+      err.code === 'TELEPHONY_DISABLED' ||
+      err.code === 'VALIDATION_ERROR' ||
+      upstreamStatus === 400 ||
+      upstreamStatus === 404 ||
+      upstreamStatus === 422 ||
+      [
+        'CONFIGURATION_ERROR',
+        'CONFIG_MISSING',
+        'WORKSPACE_OR_ORG_NOT_FOUND',
+        'APP_NOT_FOUND_IN_WORKSPACE',
+        'AGENT_UNVERIFIED_IN_WORKSPACE',
+        'DEPLOYMENT_INACTIVE',
+        'DEPLOYMENT_MISMATCH',
+      ].includes(authCat)
+    ) {
+      return {
+        category: 'CONFIGURATION_ERROR',
+        nonRetryable: true,
+        detail,
+      };
+    }
+
+    if (
+      err.code === 'SARVAM_NETWORK_ERROR' ||
+      err.code === 'SARVAM_INVALID_RESPONSE' ||
+      upstreamStatus >= 500 ||
+      upstreamStatus === 429
+    ) {
+      return {
+        category: 'PROVIDER_ERROR',
+        nonRetryable: false,
+        detail,
+      };
+    }
+  }
+
+  return {
+    category: 'PROVIDER_ERROR',
+    nonRetryable: false,
+    detail,
   };
 }

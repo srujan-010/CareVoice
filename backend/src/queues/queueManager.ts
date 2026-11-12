@@ -33,6 +33,7 @@ export async function initQueueManager(
     bullQueue = new Queue<CallJobPayload>(CALL_QUEUE_NAME, {
       connection: redis,
       defaultJobOptions: {
+        attempts: 1,
         removeOnComplete: 500,
         removeOnFail: 200,
       },

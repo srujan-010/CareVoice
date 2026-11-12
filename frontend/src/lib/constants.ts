@@ -81,7 +81,14 @@ export const DOSE_STATUS_META: Record<
 };
 
 export function getLanguageLabel(code: string): string {
-  const found = SUPPORTED_LANGUAGES.find((l) => l.code === code);
+  const trimmed = code.trim();
+  const lower = trimmed.toLowerCase();
+  const found = SUPPORTED_LANGUAGES.find(
+    (l) =>
+      l.code.toLowerCase() === lower ||
+      l.bcp47.toLowerCase() === lower ||
+      l.name.toLowerCase() === lower
+  );
   return found ? `${found.name} (${found.nativeName})` : code;
 }
 

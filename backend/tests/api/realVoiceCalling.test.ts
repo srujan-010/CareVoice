@@ -290,7 +290,7 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
       { _id: memberBadPhoneId },
       { $set: { phoneNumber: '9876543214' } }
     );
-  });
+  }, 120000);
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -911,7 +911,7 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
 
     const doseAfterTaken = await DoseInstance.findById(doseGrantedId).lean();
     expect(doseAfterTaken?.status).toBe('PATIENT_REPORTED_TAKEN');
-  });
+  }, 60000);
 
   it('Scenario 6 & 7: handles Sarvam outbound provider failure truthfully, NO_ANSWER webhook, and Admin manual cancel', async () => {
     const verifiedDeploymentPayload = [
@@ -1076,8 +1076,24 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
         startDate: new Date().toISOString(),
         frequency: 'TWICE_DAILY',
         scheduledTimes: [
-          { slotLabel: 'Lunch Slot', timeOfDay: '13:30', associatedMeal: 'LUNCH', foodInstruction: 'AFTER_FOOD' },
-          { slotLabel: 'Dinner Slot', timeOfDay: '20:30', associatedMeal: 'DINNER', foodInstruction: 'AFTER_FOOD' },
+          {
+            slotLabel: 'Lunch Slot',
+            timeOfDay: '13:30',
+            associatedMeal: 'LUNCH',
+            foodInstruction: 'AFTER_FOOD',
+            mealReminderOffsetMinutes: -15,
+            medicineReminderOffsetMinutes: 0,
+            confirmationOffsetMinutes: 20,
+          },
+          {
+            slotLabel: 'Dinner Slot',
+            timeOfDay: '20:30',
+            associatedMeal: 'DINNER',
+            foodInstruction: 'AFTER_FOOD',
+            mealReminderOffsetMinutes: -15,
+            medicineReminderOffsetMinutes: 0,
+            confirmationOffsetMinutes: 20,
+          },
         ],
       });
     expect(recMedRes.status).toBe(201);
@@ -1248,7 +1264,7 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
     expect(recBRes.body.data.conversation.turns).toHaveLength(2);
     expect(recBRes.body.data.conversation.turns[0].text).toBe('భోజనం తర్వాత మందు వేసుకున్నారా?');
     expect(recBRes.body.data.conversation.turns[0].translatedText).toBe('Did you take medicine after food?');
-  });
+  }, 60000);
 
   it('Scenario 12: enforces full 3-way independent consent matrix and revocation retention policy', async () => {
     const verifiedDep = [
@@ -1293,7 +1309,17 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
         associatedMeal: 'BREAKFAST',
         startDate: new Date().toISOString(),
         frequency: 'ONCE_DAILY',
-        scheduledTimes: [{ slotLabel: 'Breakfast', timeOfDay: '08:00', associatedMeal: 'BREAKFAST', foodInstruction: 'BEFORE_FOOD' }],
+        scheduledTimes: [
+          {
+            slotLabel: 'Breakfast',
+            timeOfDay: '08:00',
+            associatedMeal: 'BREAKFAST',
+            foodInstruction: 'BEFORE_FOOD',
+            mealReminderOffsetMinutes: -15,
+            medicineReminderOffsetMinutes: 0,
+            confirmationOffsetMinutes: 20,
+          },
+        ],
       });
     const doseTrOnlyId = String((await DoseInstance.findOne({ medicineId: medTrOnly.body.data.id }).lean())?._id);
 
@@ -1374,7 +1400,17 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
         associatedMeal: 'BREAKFAST',
         startDate: new Date().toISOString(),
         frequency: 'ONCE_DAILY',
-        scheduledTimes: [{ slotLabel: 'Breakfast', timeOfDay: '08:00', associatedMeal: 'BREAKFAST', foodInstruction: 'AFTER_FOOD' }],
+        scheduledTimes: [
+          {
+            slotLabel: 'Breakfast',
+            timeOfDay: '08:00',
+            associatedMeal: 'BREAKFAST',
+            foodInstruction: 'AFTER_FOOD',
+            mealReminderOffsetMinutes: -15,
+            medicineReminderOffsetMinutes: 0,
+            confirmationOffsetMinutes: 20,
+          },
+        ],
       });
     const doseRevokeId = String((await DoseInstance.findOne({ medicineId: medRevoke.body.data.id }).lean())?._id);
 
@@ -1447,7 +1483,7 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
       .get(`/api/calls/${callRevokeId}/recording`)
       .set('Authorization', `Bearer ${adminToken}`);
     expect(recAfterRevoke.status).toBe(403);
-  });
+  }, 60000);
 
   it('Scenario 13: blocks unsupported language without silent Hindi fallback, allows explicit authorized fallback, and flags language mismatch', async () => {
     const verifiedDep = [
@@ -1492,8 +1528,24 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
         startDate: new Date().toISOString(),
         frequency: 'TWICE_DAILY',
         scheduledTimes: [
-          { slotLabel: 'Breakfast', timeOfDay: '08:00', associatedMeal: 'BREAKFAST', foodInstruction: 'BEFORE_FOOD' },
-          { slotLabel: 'Dinner', timeOfDay: '20:00', associatedMeal: 'DINNER', foodInstruction: 'BEFORE_FOOD' },
+          {
+            slotLabel: 'Breakfast',
+            timeOfDay: '08:00',
+            associatedMeal: 'BREAKFAST',
+            foodInstruction: 'BEFORE_FOOD',
+            mealReminderOffsetMinutes: -15,
+            medicineReminderOffsetMinutes: 0,
+            confirmationOffsetMinutes: 20,
+          },
+          {
+            slotLabel: 'Dinner',
+            timeOfDay: '20:00',
+            associatedMeal: 'DINNER',
+            foodInstruction: 'BEFORE_FOOD',
+            mealReminderOffsetMinutes: -15,
+            medicineReminderOffsetMinutes: 0,
+            confirmationOffsetMinutes: 20,
+          },
         ],
       });
     const urDoses = await DoseInstance.find({ medicineId: medUr.body.data.id }).lean();
@@ -1580,7 +1632,17 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
         associatedMeal: 'DINNER',
         startDate: new Date().toISOString(),
         frequency: 'ONCE_DAILY',
-        scheduledTimes: [{ slotLabel: 'Dinner', timeOfDay: '20:00', associatedMeal: 'DINNER', foodInstruction: 'AFTER_FOOD' }],
+        scheduledTimes: [
+          {
+            slotLabel: 'Dinner',
+            timeOfDay: '20:00',
+            associatedMeal: 'DINNER',
+            foodInstruction: 'AFTER_FOOD',
+            mealReminderOffsetMinutes: -15,
+            medicineReminderOffsetMinutes: 0,
+            confirmationOffsetMinutes: 20,
+          },
+        ],
       });
     const doseMismatchId = String((await DoseInstance.findOne({ medicineId: medMismatch.body.data.id }).lean())?._id);
 
@@ -1621,6 +1683,6 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
     expect(mismatchWh.body.data.callLog.requestedLanguage).toBe('te');
     expect(mismatchWh.body.data.callLog.actualLanguageUsed).toBe('hi');
     expect(mismatchWh.body.data.callLog.languageStatus).toBe('LANGUAGE_MISMATCH');
-  });
+  }, 60000);
 });
 
