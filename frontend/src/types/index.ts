@@ -106,6 +106,35 @@ export interface SarvamDiscoveredConnectionSummary {
   source: 'deployment' | 'campaign';
 }
 
+export type SarvamPreflightCheckStatus =
+  | 'VERIFIED'
+  | 'READY'
+  | 'CONNECTION_VERIFICATION_UNAVAILABLE'
+  | 'UNVERIFIED'
+  | 'INACTIVE'
+  | 'MISMATCH'
+  | 'NOT_FOUND'
+  | 'MISSING'
+  | 'ERROR';
+
+export interface SarvamPreflightCheckItem {
+  status: SarvamPreflightCheckStatus;
+  label: string;
+  detail: string;
+  blocking: boolean;
+  source?: string;
+}
+
+export interface SarvamPreflightChecks {
+  apiAuthentication: SarvamPreflightCheckItem;
+  agentIdAndVersion: SarvamPreflightCheckItem;
+  connectionIdValidity: SarvamPreflightCheckItem;
+  callerNumberAvailability: SarvamPreflightCheckItem;
+  outboundCapability: SarvamPreflightCheckItem;
+  webhookReadiness: SarvamPreflightCheckItem;
+  dynamicVariableCompatibility: SarvamPreflightCheckItem;
+}
+
 export interface SarvamWorkspaceDiscoverySummary {
   orgId: string;
   workspaceId: string;
@@ -115,6 +144,8 @@ export interface SarvamWorkspaceDiscoverySummary {
   configuredPhoneMasked: string;
   analyticsAppCheckStatus?: number;
   analyticsAppCheckDetail?: string;
+  analyticsTotalInteractions?: number;
+  analyticsCallerPhonesMasked?: string[];
   observedAgentVariables?: string[];
   configuredAllowedAgentVariables?: string[];
   endpointsChecked: string[];
@@ -133,13 +164,24 @@ export interface VoiceCallPreflight {
   webhookHttps: boolean;
   mockSimulationAllowed: boolean;
   liveCallingAllowed: boolean;
+  instantOutboundReady?: boolean;
+  inboundDeploymentReady?: boolean;
+  campaignReady?: boolean;
+  connectionVerificationUnavailable?: boolean;
+  preflightChecks?: SarvamPreflightChecks | null;
   agentVersion: number;
   callerIdMasked: string | null;
   deploymentCheck?: {
     verified: boolean;
+    instantOutboundReady: boolean;
+    inboundDeploymentReady: boolean;
+    campaignReady: boolean;
+    connectionVerificationUnavailable: boolean;
     status:
       | 'active'
       | 'verified_campaign'
+      | 'instant_outbound_ready'
+      | 'connection_verification_unavailable'
       | 'inactive'
       | 'mismatch'
       | 'not_found'
@@ -147,6 +189,7 @@ export interface VoiceCallPreflight {
       | 'error';
     authCategory?:
       | 'VERIFIED'
+      | 'CONNECTION_VERIFICATION_UNAVAILABLE'
       | 'CONFIG_MISSING'
       | 'KEY_SYNTAX_ERROR'
       | 'INVALID_API_KEY_FORMAT'
@@ -171,6 +214,7 @@ export interface VoiceCallPreflight {
     diagnosticHint?: string;
     authHeader?: 'X-API-Key';
     credentialsSharedWithOutbound?: boolean;
+    checks?: SarvamPreflightChecks;
     workspaceDiscovery?: SarvamWorkspaceDiscoverySummary;
   } | null;
 }

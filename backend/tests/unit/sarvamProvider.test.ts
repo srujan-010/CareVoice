@@ -414,7 +414,7 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
       phoneVerified: true,
     });
 
-    // Inactive deployment blocks
+    // Paused inbound deployment keeps inboundDeploymentReady=false, while Instant Outbound remains independent (and surfaces CONNECTION_VERIFICATION_UNAVAILABLE when no connection_configs exist)
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -423,9 +423,16 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
         json: async () => [{ deployment_id: 'dep_1', app_id: 'agent-1', status: 'paused' }],
       })
     );
-    const inactiveDeploy = await provider.verifyAgentDeployment();
-    expect(inactiveDeploy.verified).toBe(false);
-    expect(inactiveDeploy.status).toBe('inactive');
+    const pausedInboundDeploy = await provider.verifyAgentDeployment();
+    expect(pausedInboundDeploy.verified).toBe(false);
+    expect(pausedInboundDeploy.inboundDeploymentReady).toBe(false);
+    expect(pausedInboundDeploy.campaignReady).toBe(false);
+    expect(pausedInboundDeploy.instantOutboundReady).toBe(true);
+    expect(pausedInboundDeploy.connectionVerificationUnavailable).toBe(true);
+    expect(pausedInboundDeploy.authCategory).toBe('CONNECTION_VERIFICATION_UNAVAILABLE');
+    expect(pausedInboundDeploy.checks.outboundCapability.status).toBe(
+      'CONNECTION_VERIFICATION_UNAVAILABLE'
+    );
 
     // Official paginated { items: [...] } deployment envelope with top-level phone_numbers
     vi.stubGlobal(
@@ -806,14 +813,23 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
     const verifiedViaCampaign = await provider.verifyAgentDeployment();
     expect(verifiedViaCampaign).toMatchObject({
       verified: true,
+      instantOutboundReady: true,
+      inboundDeploymentReady: false,
+      campaignReady: true,
+      connectionVerificationUnavailable: false,
       status: 'verified_campaign',
       authCategory: 'VERIFIED',
       matchedAppVersion: 3,
       connectionVerified: true,
       phoneVerified: true,
     });
+    expect(verifiedViaCampaign.checks.outboundCapability.status).toBe('VERIFIED');
+    expect(verifiedViaCampaign.checks.connectionIdValidity.status).toBe('VERIFIED');
+    expect(verifiedViaCampaign.checks.callerNumberAvailability.status).toBe('VERIFIED');
 
-    // Case D: Agent exists ONLY in Experiments -> stays strictly locked as unverified
+    // Case D: Agent at committed v3 exists without any Inbound Deployment or Bulk Campaign
+    // -> Instant Outbound MUST NOT fail with AGENT_UNVERIFIED_IN_WORKSPACE; instead it separates
+    // readiness planes and reports CONNECTION_VERIFICATION_UNAVAILABLE honestly while unlocking supervised test.
     const expOnlyFetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/experiments?')) {
@@ -842,8 +858,70 @@ describe('SarvamVoiceProvider, Env Validation & Safety Guardrails', () => {
 
     const expOnlyRes = await provider.verifyAgentDeployment();
     expect(expOnlyRes.verified).toBe(false);
-    expect(expOnlyRes.status).toBe('unverified');
-    expect(expOnlyRes.authCategory).toBe('AGENT_UNVERIFIED_IN_WORKSPACE');
+    expect(expOnlyRes.instantOutboundReady).toBe(true);
+    expect(expOnlyRes.inboundDeploymentReady).toBe(false);
+    expect(expOnlyRes.campaignReady).toBe(false);
+    expect(expOnlyRes.connectionVerificationUnavailable).toBe(true);
+    expect(expOnlyRes.status).toBe('instant_outbound_ready');
+    expect(expOnlyRes.authCategory).toBe('CONNECTION_VERIFICATION_UNAVAILABLE');
+    expect(expOnlyRes.checks).toMatchObject({
+      apiAuthentication: { status: 'VERIFIED', blocking: false },
+      agentIdAndVersion: { status: 'VERIFIED', blocking: false },
+      connectionIdValidity: { status: 'CONNECTION_VERIFICATION_UNAVAILABLE', blocking: false },
+      callerNumberAvailability: { status: 'CONNECTION_VERIFICATION_UNAVAILABLE', blocking: false },
+      outboundCapability: { status: 'CONNECTION_VERIFICATION_UNAVAILABLE', blocking: false },
+      webhookReadiness: { status: 'READY', blocking: false },
+      dynamicVariableCompatibility: { status: 'VERIFIED', blocking: false },
+    });
+
+    // Case D2: Zero-history Analytics HTTP 200 MUST NOT mark telephony/connection/version verified
+    const zeroHistoryAnalyticsFetch = vi.fn(async () => {
+      return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', zeroHistoryAnalyticsFetch);
+
+    const zeroHistoryRes = await provider.verifyAgentDeployment();
+    expect(zeroHistoryRes.verified).toBe(false);
+    expect(zeroHistoryRes.instantOutboundReady).toBe(true);
+    expect(zeroHistoryRes.connectionVerified).toBe(false);
+    expect(zeroHistoryRes.phoneVerified).toBe(false);
+    expect(zeroHistoryRes.connectionVerificationUnavailable).toBe(true);
+    expect(zeroHistoryRes.authCategory).toBe('CONNECTION_VERIFICATION_UNAVAILABLE');
+    expect(zeroHistoryRes.checks.agentIdAndVersion.status).toBe('UNVERIFIED');
+    expect(zeroHistoryRes.checks.connectionIdValidity.status).toBe(
+      'CONNECTION_VERIFICATION_UNAVAILABLE'
+    );
+    expect(zeroHistoryRes.checks.outboundCapability.status).toBe(
+      'CONNECTION_VERIFICATION_UNAVAILABLE'
+    );
+
+    // Case D3: Committed version mismatch STILL strictly blocks Instant Outbound
+    const versionMismatchFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/experiments?')) {
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                experiment_id: 'exp_old',
+                variants: [{ app_config: { app_id: 'Conversatio-a7e64173-3c11', app_version: 2 } }],
+              },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', versionMismatchFetch);
+
+    const mismatchRes = await provider.verifyAgentDeployment();
+    expect(mismatchRes.verified).toBe(false);
+    expect(mismatchRes.instantOutboundReady).toBe(false);
+    expect(mismatchRes.status).toBe('mismatch');
+    expect(mismatchRes.authCategory).toBe('DEPLOYMENT_MISMATCH');
+    expect(mismatchRes.checks.agentIdAndVersion.status).toBe('MISMATCH');
+    expect(mismatchRes.checks.agentIdAndVersion.blocking).toBe(true);
 
     // Case E: Outbound POST 404 classifies as APP_NOT_FOUND_IN_WORKSPACE
     vi.stubGlobal(

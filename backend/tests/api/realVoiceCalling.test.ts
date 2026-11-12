@@ -1684,5 +1684,93 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
     expect(mismatchWh.body.data.callLog.actualLanguageUsed).toBe('hi');
     expect(mismatchWh.body.data.callLog.languageStatus).toBe('LANGUAGE_MISMATCH');
   }, 60000);
+
+  it('Scenario 16: unlocks supervised Instant Outbound test calls without requiring an Inbound Deployment or Bulk Campaign and reports 7 independent checks + CONNECTION_VERIFICATION_UNAVAILABLE', async () => {
+    const instantMed = await request(app)
+      .post('/api/medicines')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        familyMemberId: memberAllGrantedId,
+        name: 'Vitamin D3',
+        dosage: '1000IU',
+        prescribedInstructions: 'After lunch',
+        foodInstruction: 'AFTER_FOOD',
+        associatedMeal: 'LUNCH',
+        startDate: new Date().toISOString(),
+        frequency: 'ONCE_DAILY',
+        scheduledTimes: [
+          {
+            slotLabel: 'Lunch Slot',
+            timeOfDay: '13:30',
+            associatedMeal: 'LUNCH',
+            foodInstruction: 'AFTER_FOOD',
+            mealReminderOffsetMinutes: -15,
+            medicineReminderOffsetMinutes: 0,
+            confirmationOffsetMinutes: 20,
+          },
+        ],
+      });
+    expect(instantMed.status).toBe(201);
+    const instantDoseId = String(
+      (await DoseInstance.findOne({ medicineId: instantMed.body.data.id }).lean())?._id
+    );
+
+    const instantFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method || 'GET';
+      if (url.includes('/outbounds') && method === 'POST') {
+        return new Response(
+          JSON.stringify({ attempt_id: 'attempt_instant_outbound_001', status: 'queued' }),
+          { status: 200 }
+        );
+      }
+      if (url.includes('/analytics/v1/') && url.includes('/interactions')) {
+        return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', instantFetch);
+
+    const preflightRes = await request(app)
+      .get('/api/voice-calls/preflight?verifyDeployment=true')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(preflightRes.status).toBe(200);
+    expect(preflightRes.body.data.liveCallingAllowed).toBe(true);
+    expect(preflightRes.body.data.instantOutboundReady).toBe(true);
+    expect(preflightRes.body.data.inboundDeploymentReady).toBe(false);
+    expect(preflightRes.body.data.campaignReady).toBe(false);
+    expect(preflightRes.body.data.connectionVerificationUnavailable).toBe(true);
+    expect(preflightRes.body.data.deploymentCheck).toMatchObject({
+      verified: false,
+      instantOutboundReady: true,
+      inboundDeploymentReady: false,
+      campaignReady: false,
+      connectionVerificationUnavailable: true,
+      status: 'instant_outbound_ready',
+      authCategory: 'CONNECTION_VERIFICATION_UNAVAILABLE',
+    });
+    expect(preflightRes.body.data.preflightChecks).toMatchObject({
+      apiAuthentication: { status: 'VERIFIED', blocking: false },
+      agentIdAndVersion: { status: 'UNVERIFIED', blocking: false },
+      connectionIdValidity: { status: 'CONNECTION_VERIFICATION_UNAVAILABLE', blocking: false },
+      callerNumberAvailability: { status: 'CONNECTION_VERIFICATION_UNAVAILABLE', blocking: false },
+      outboundCapability: { status: 'CONNECTION_VERIFICATION_UNAVAILABLE', blocking: false },
+      webhookReadiness: { status: 'READY', blocking: false },
+      dynamicVariableCompatibility: { status: 'VERIFIED', blocking: false },
+    });
+
+    const dialRes = await request(app)
+      .post('/api/voice-calls/real-test')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        familyMemberId: memberAllGrantedId,
+        doseInstanceId: instantDoseId,
+        callType: 'MEDICINE_REMINDER',
+        confirmedByAdmin: true,
+        overrideQuietHours: true,
+      });
+    expect(dialRes.status).toBe(201);
+    expect(dialRes.body.data.providerResponse.attemptId).toBe('attempt_instant_outbound_001');
+  }, 60000);
 });
 

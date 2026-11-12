@@ -179,7 +179,7 @@ export default function CallsPage() {
               <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600 mt-0.5" />
               <div className="text-xs sm:text-sm">
                 <p className="font-bold text-emerald-900">
-                  Live Sarvam Vobiz Outbound Telephony Enabled
+                  Live Sarvam Instant Outbound Telephony Ready (Rent from Sarvam / Sarvam Vobiz)
                 </p>
                 <p className="text-emerald-800">
                   Caller ID: {preflight.callerIdMasked || 'Configured'} • Agent v

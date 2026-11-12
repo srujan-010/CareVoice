@@ -307,7 +307,8 @@ export function RealTestCallDialog({
   }, [selectedMember, callType]);
 
   const systemBlocked =
-    !preflight?.liveCallingAllowed || !preflight?.deploymentCheck?.verified;
+    !preflight?.liveCallingAllowed ||
+    (preflight?.deploymentCheck ? !preflight.deploymentCheck.instantOutboundReady : false);
 
   const canSubmit =
     !submitting &&
@@ -450,12 +451,13 @@ export function RealTestCallDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-slate-900">
             <PhoneCall className="h-5 w-5 text-blue-600" />
-            Place Real Outbound Call (Sarvam + Vobiz)
+            Place Real Outbound Call (Sarvam Instant Outbound)
           </DialogTitle>
           <DialogDescription>
-            ADMIN-only live outbound call via Sarvam Instant Outbound API. Verifies E.164 phone
-            number, automated calling consent, separate recording consent, and HTTPS webhooks before
-            dialing.
+            ADMIN-only live outbound call via Sarvam Instant Outbound API (supports Rent from Sarvam
+            native Vobiz without requiring a Campaign or Inbound Deployment). Verifies E.164 phone
+            number, calling consent, separate recording/transcript consent, and HTTPS webhooks
+            before dialing.
           </DialogDescription>
         </DialogHeader>
 
@@ -498,15 +500,17 @@ export function RealTestCallDialog({
 
               {preflight.deploymentCheck ? (
                 <div
-                  className={`rounded-xl border px-3 py-2.5 text-xs space-y-1.5 ${
+                  className={`rounded-xl border px-3 py-2.5 text-xs space-y-2.5 ${
                     preflight.deploymentCheck.verified
-                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                      : 'border-rose-200 bg-rose-50 text-rose-800'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                      : preflight.deploymentCheck.instantOutboundReady
+                        ? 'border-amber-200 bg-amber-50/90 text-amber-950'
+                        : 'border-rose-200 bg-rose-50 text-rose-800'
                   }`}
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="font-bold">
-                      Sarvam Preflight Status ({preflight.deploymentCheck.status.toUpperCase()}
+                      Sarvam Instant Outbound Preflight ({preflight.deploymentCheck.status.replace(/_/g, ' ').toUpperCase()}
                       {preflight.deploymentCheck.upstreamStatus
                         ? ` • HTTP ${preflight.deploymentCheck.upstreamStatus}`
                         : ''}
@@ -514,22 +518,113 @@ export function RealTestCallDialog({
                     </p>
                     {preflight.deploymentCheck.authCategory &&
                     preflight.deploymentCheck.authCategory !== 'VERIFIED' ? (
-                      <Badge variant="danger">
+                      <Badge
+                        variant={
+                          preflight.deploymentCheck.instantOutboundReady ? 'warning' : 'danger'
+                        }
+                      >
                         {preflight.deploymentCheck.authCategory.replace(/_/g, ' ')}
                       </Badge>
-                    ) : null}
+                    ) : (
+                      <Badge variant="success">FULLY VERIFIED</Badge>
+                    )}
                   </div>
+
+                  {/* Separated Readiness Planes */}
+                  <div className="flex flex-wrap gap-1.5">
+                    <Badge
+                      variant={
+                        preflight.deploymentCheck.instantOutboundReady ? 'success' : 'danger'
+                      }
+                    >
+                      Instant Outbound:{' '}
+                      {preflight.deploymentCheck.instantOutboundReady ? 'READY' : 'LOCKED'}
+                    </Badge>
+                    <Badge
+                      variant={
+                        preflight.deploymentCheck.inboundDeploymentReady ? 'success' : 'neutral'
+                      }
+                    >
+                      Inbound Deployment:{' '}
+                      {preflight.deploymentCheck.inboundDeploymentReady
+                        ? 'ACTIVE'
+                        : 'Not Required for Outbound'}
+                    </Badge>
+                    <Badge variant={preflight.deploymentCheck.campaignReady ? 'success' : 'neutral'}>
+                      Bulk Campaign:{' '}
+                      {preflight.deploymentCheck.campaignReady
+                        ? 'MATCHED'
+                        : 'Not Required for Instant Outbound'}
+                    </Badge>
+                  </div>
+
                   <p>{preflight.deploymentCheck.message}</p>
+
+                  {/* 7 Independent Preflight Checks */}
+                  {preflight.deploymentCheck.checks ? (
+                    <div className="rounded-xl border border-slate-200/80 bg-white/90 p-2.5 space-y-1.5 text-slate-800">
+                      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-600">
+                        7 Independent Preflight Checks (Rent from Sarvam / Sarvam Vobiz)
+                      </p>
+                      <div className="grid grid-cols-1 gap-1.5">
+                        {[
+                          preflight.deploymentCheck.checks.apiAuthentication,
+                          preflight.deploymentCheck.checks.agentIdAndVersion,
+                          preflight.deploymentCheck.checks.connectionIdValidity,
+                          preflight.deploymentCheck.checks.callerNumberAvailability,
+                          preflight.deploymentCheck.checks.outboundCapability,
+                          preflight.deploymentCheck.checks.webhookReadiness,
+                          preflight.deploymentCheck.checks.dynamicVariableCompatibility,
+                        ].map((chk) => {
+                          const badgeVariant =
+                            chk.status === 'VERIFIED' || chk.status === 'READY'
+                              ? 'success'
+                              : chk.status === 'CONNECTION_VERIFICATION_UNAVAILABLE' ||
+                                  chk.status === 'UNVERIFIED'
+                                ? 'warning'
+                                : 'danger';
+                          return (
+                            <div
+                              key={chk.label}
+                              className="rounded-lg border border-slate-200/70 bg-slate-50/70 px-2.5 py-1.5 flex flex-col gap-0.5"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-1.5">
+                                <span className="font-semibold text-[11px] text-slate-900">
+                                  {chk.label}
+                                </span>
+                                <Badge variant={badgeVariant}>
+                                  {chk.status}
+                                </Badge>
+                              </div>
+                              <p className="text-[10.5px] text-slate-600">{chk.detail}</p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+
                   {preflight.deploymentCheck.diagnosticHint ? (
-                    <p className="rounded-lg border border-rose-200/80 bg-white/80 px-2.5 py-1.5 text-[11px] text-rose-900">
-                      <strong>Fix Action:</strong> {preflight.deploymentCheck.diagnosticHint}
+                    <p
+                      className={`rounded-lg border px-2.5 py-1.5 text-[11px] ${
+                        preflight.deploymentCheck.instantOutboundReady
+                          ? 'border-amber-200/80 bg-white/80 text-amber-900'
+                          : 'border-rose-200/80 bg-white/80 text-rose-900'
+                      }`}
+                    >
+                      <strong>
+                        {preflight.deploymentCheck.instantOutboundReady
+                          ? 'Instant Outbound Note:'
+                          : 'Fix Action:'}
+                      </strong>{' '}
+                      {preflight.deploymentCheck.diagnosticHint}
                     </p>
                   ) : null}
                   {preflight.deploymentCheck.credentialsSharedWithOutbound ? (
                     <p className="text-[11px] opacity-85">
                       Auth header: <code>{preflight.deploymentCheck.authHeader || 'X-API-Key'}</code>{' '}
                       (read-only GET verification with same workspace credentials used by Sarvam
-                      Outbound API; live dialing stays locked until verified).
+                      Instant Outbound API; never places a call during preflight).
                     </p>
                   ) : null}
 
@@ -586,6 +681,8 @@ export function RealTestCallDialog({
                           {preflight.deploymentCheck.workspaceDiscovery.analyticsAppCheckDetail
                             ? ` — ${preflight.deploymentCheck.workspaceDiscovery.analyticsAppCheckDetail}`
                             : ''}
+                          {' '}
+                          (app lookup only — never treated as telephony verification)
                         </p>
                       </div>
 
@@ -651,12 +748,12 @@ export function RealTestCallDialog({
                           ))}
                         </div>
                       ) : (
-                        <div className="rounded-lg border border-amber-200 bg-amber-50/80 px-2.5 py-2 text-amber-900">
-                          No existing Deployments, Campaigns, Experiments, or Test Suites surfaced any{' '}
-                          <code>app_id</code> under this Org/Workspace. Open the agent in{' '}
-                          <strong>apps.sarvam.ai</strong>, verify the Org & Workspace IDs match the
-                          workspace URL, commit a non-Draft version, copy the exact ID from{' '}
-                          <code>··· → Copy agent ID</code>, and link it to a Deployment or Campaign.
+                        <div className="rounded-lg border border-sky-200 bg-sky-50/70 px-2.5 py-2 text-slate-700">
+                          No Inbound Deployments, Bulk Campaigns, Experiments, or Test Suites currently
+                          reference an <code>app_id</code> in this workspace. Note: Instant Outbound calls
+                          do not require a Campaign ID or Deployment ID, and{' '}
+                          <strong>Rent from Sarvam</strong> numbers/connections live natively in{' '}
+                          <strong>Deploy → Phone Numbers</strong> (no external Vobiz credentials needed).
                         </div>
                       )}
 

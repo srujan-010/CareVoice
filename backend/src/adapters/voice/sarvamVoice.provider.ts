@@ -23,6 +23,7 @@ import {
 
 export type SarvamAuthCategory =
   | 'VERIFIED'
+  | 'CONNECTION_VERIFICATION_UNAVAILABLE'
   | 'CONFIG_MISSING'
   | 'KEY_SYNTAX_ERROR'
   | 'INVALID_API_KEY_FORMAT'
@@ -37,6 +38,35 @@ export type SarvamAuthCategory =
   | 'CONFIGURATION_ERROR'
   | 'NETWORK_ERROR'
   | 'UPSTREAM_ERROR';
+
+export type SarvamPreflightCheckStatus =
+  | 'VERIFIED'
+  | 'READY'
+  | 'CONNECTION_VERIFICATION_UNAVAILABLE'
+  | 'UNVERIFIED'
+  | 'INACTIVE'
+  | 'MISMATCH'
+  | 'NOT_FOUND'
+  | 'MISSING'
+  | 'ERROR';
+
+export interface SarvamPreflightCheckItem {
+  status: SarvamPreflightCheckStatus;
+  label: string;
+  detail: string;
+  blocking: boolean;
+  source?: string;
+}
+
+export interface SarvamPreflightChecks {
+  apiAuthentication: SarvamPreflightCheckItem;
+  agentIdAndVersion: SarvamPreflightCheckItem;
+  connectionIdValidity: SarvamPreflightCheckItem;
+  callerNumberAvailability: SarvamPreflightCheckItem;
+  outboundCapability: SarvamPreflightCheckItem;
+  webhookReadiness: SarvamPreflightCheckItem;
+  dynamicVariableCompatibility: SarvamPreflightCheckItem;
+}
 
 /**
  * Exact 8 input variables currently configured on the Sarvam "Family Medicine Assistant"
@@ -373,6 +403,8 @@ export interface SarvamWorkspaceDiscoverySummary {
   configuredPhoneMasked: string;
   analyticsAppCheckStatus?: number;
   analyticsAppCheckDetail?: string;
+  analyticsTotalInteractions?: number;
+  analyticsCallerPhonesMasked?: string[];
   observedAgentVariables?: string[];
   configuredAllowedAgentVariables?: string[];
   endpointsChecked: string[];
@@ -382,9 +414,15 @@ export interface SarvamWorkspaceDiscoverySummary {
 
 export interface SarvamDeploymentVerificationResult {
   verified: boolean;
+  instantOutboundReady: boolean;
+  inboundDeploymentReady: boolean;
+  campaignReady: boolean;
+  connectionVerificationUnavailable: boolean;
   status:
     | 'active'
     | 'verified_campaign'
+    | 'instant_outbound_ready'
+    | 'connection_verification_unavailable'
     | 'inactive'
     | 'mismatch'
     | 'not_found'
@@ -401,6 +439,7 @@ export interface SarvamDeploymentVerificationResult {
   diagnosticHint?: string;
   authHeader: 'X-API-Key';
   credentialsSharedWithOutbound: boolean;
+  checks: SarvamPreflightChecks;
   workspaceDiscovery?: SarvamWorkspaceDiscoverySummary;
 }
 
@@ -665,6 +704,15 @@ function classifySarvamHttpFailure(
       };
     }
 
+    if (/connection|phone_number|agent_phone_number|vobiz/i.test(detailText)) {
+      return {
+        authCategory: 'CONFIGURATION_ERROR',
+        errorCategory: 'CONFIGURATION_ERROR',
+        diagnosticHint:
+          'Sarvam rejected the telephony connection_id or agent_phone_number. Open https://apps.sarvam.ai -> Deploy -> Phone Numbers -> Sarvam Vobiz (Rent from Sarvam) to copy the exact connection ID and rented phone number into SARVAM_CONNECTION_ID and SARVAM_PHONE_NUMBER (no external Vobiz credentials required).',
+      };
+    }
+
     return {
       authCategory: 'CONFIGURATION_ERROR',
       errorCategory: 'CONFIGURATION_ERROR',
@@ -677,7 +725,7 @@ function classifySarvamHttpFailure(
     authCategory: 'UPSTREAM_ERROR',
     errorCategory: 'PROVIDER_ERROR',
     diagnosticHint:
-      'Sarvam Voice Agents API returned a non-2xx error. Verify agent ID, version, Vobiz connection ID, and Sarvam API service status.',
+      'Sarvam Voice Agents API returned a non-2xx error. Verify agent ID, committed version, Sarvam Vobiz connection ID (Rent from Sarvam), and Sarvam API service status.',
   };
 }
 
@@ -994,14 +1042,14 @@ export class SarvamVoiceProvider implements IVoiceProvider {
       }
     };
 
-    // Fetch missing deployment details for up to 5 deployments to recover connection_configs
+    // Fetch missing deployment details for up to 10 deployments to recover connection_configs
     const deploymentsNeedingDetail = deploymentsList
       .filter(
         (d) =>
           Boolean(d?.deployment_id) &&
           (!Array.isArray(d.connection_configs) || d.connection_configs.length === 0)
       )
-      .slice(0, 5);
+      .slice(0, 10);
 
     const endNow = new Date();
     const start30d = new Date(endNow.getTime() - 30 * 24 * 60 * 60 * 1000);
@@ -1065,9 +1113,13 @@ export class SarvamVoiceProvider implements IVoiceProvider {
     if (campaignsRes.ok) {
       endpointsChecked.push('campaigns');
       const campaigns = extractPagedItems<SarvamCampaignRecord>(campaignsRes.json, ['campaigns']);
-      const matchedCampaigns = campaigns.filter((c) => c?.app_id === env.SARVAM_AGENT_ID);
-      const otherCampaigns = campaigns.filter((c) => c?.app_id !== env.SARVAM_AGENT_ID);
-      const detailTargets = [...matchedCampaigns, ...otherCampaigns].slice(0, 5);
+      const matchedCampaigns = campaigns.filter(
+        (c) => (c?.app_config?.app_id || c?.app_id) === env.SARVAM_AGENT_ID
+      );
+      const otherCampaigns = campaigns.filter(
+        (c) => (c?.app_config?.app_id || c?.app_id) !== env.SARVAM_AGENT_ID
+      );
+      const detailTargets = [...matchedCampaigns, ...otherCampaigns].slice(0, 10);
 
       const campaignDetails = await Promise.all(
         detailTargets
@@ -1158,6 +1210,7 @@ export class SarvamVoiceProvider implements IVoiceProvider {
     endpointsChecked.push('analytics-interactions');
     let analyticsTotal = 0;
     const observedVariableKeys = new Set<string>();
+    const analyticsCallerPhones = new Set<string>();
     if (analyticsRes.ok && analyticsRes.json && typeof analyticsRes.json === 'object') {
       const rec = analyticsRes.json as {
         total?: number;
@@ -1179,7 +1232,11 @@ export class SarvamVoiceProvider implements IVoiceProvider {
             }
             if (item?.deployment_id) entry.deploymentIds.add(item.deployment_id);
             if (item?.bot_contact_identifier) {
-              entry.rawPhones.add(item.bot_contact_identifier.trim());
+              const trimmedPhone = item.bot_contact_identifier.trim();
+              if (trimmedPhone) {
+                entry.rawPhones.add(trimmedPhone);
+                analyticsCallerPhones.add(trimmedPhone);
+              }
             }
             if (item?.agent_variables && typeof item.agent_variables === 'object') {
               for (const k of Object.keys(item.agent_variables)) {
@@ -1244,6 +1301,11 @@ export class SarvamVoiceProvider implements IVoiceProvider {
         analyticsAppCheckDetail: analyticsRes.errorSummary
           ? redactSecrets(analyticsRes.errorSummary)
           : undefined,
+        analyticsTotalInteractions: analyticsRes.ok ? analyticsTotal : undefined,
+        analyticsCallerPhonesMasked:
+          analyticsCallerPhones.size > 0
+            ? Array.from(analyticsCallerPhones).map(maskPhoneSafe)
+            : undefined,
         observedAgentVariables:
           observedVariableKeys.size > 0 ? Array.from(observedVariableKeys).sort() : undefined,
         configuredAllowedAgentVariables: parseConfiguredAllowedAgentVariables(),
@@ -1254,22 +1316,167 @@ export class SarvamVoiceProvider implements IVoiceProvider {
     };
   }
 
+  private evaluateLocalPreflightChecks(
+    observedVariables?: string[]
+  ): {
+    webhookReadiness: SarvamPreflightCheckItem;
+    dynamicVariableCompatibility: SarvamPreflightCheckItem;
+  } {
+    const webhookInfo = getSarvamWebhookReadiness();
+    const webhookReadiness: SarvamPreflightCheckItem = webhookInfo.ready
+      ? {
+          status: 'READY',
+          label: 'Webhook Readiness',
+          detail:
+            'HTTPS webhook base URL (PUBLIC_WEBHOOK_BASE_URL) and webhook authentication are configured.',
+          blocking: false,
+          source: 'env',
+        }
+      : {
+          status: 'MISSING',
+          label: 'Webhook Readiness',
+          detail: `Webhook configuration incomplete or non-HTTPS: ${webhookInfo.missingFields.join(', ')}.`,
+          blocking: true,
+          source: 'env',
+        };
+
+    let dynamicVariableCompatibility: SarvamPreflightCheckItem;
+    try {
+      const allowedKeys = parseConfiguredAllowedAgentVariables();
+      const aliasMap = parseAgentVariableAliasMap();
+      const invalidSchemaKeys: string[] = [];
+
+      for (const key of allowedKeys) {
+        if (INTERNAL_ONLY_VARIABLE_SET.has(key) && !aliasMap[key]) {
+          invalidSchemaKeys.push(key);
+          continue;
+        }
+        const canonical =
+          aliasMap[key] ??
+          (CANONICAL_VARIABLE_KEY_SET.has(key)
+            ? (key as CareVoiceCanonicalVariableKey)
+            : undefined);
+        if (!canonical) {
+          invalidSchemaKeys.push(key);
+        }
+      }
+
+      if (invalidSchemaKeys.length > 0) {
+        dynamicVariableCompatibility = {
+          status: 'ERROR',
+          label: 'Dynamic Variable Compatibility',
+          detail: `Invalid or internal-only key(s) in agent variable schema: [${invalidSchemaKeys.join(', ')}].`,
+          blocking: true,
+          source: 'env',
+        };
+      } else {
+        const unobserved = observedVariables && observedVariables.length > 0
+          ? allowedKeys.filter((k) => !observedVariables.includes(k))
+          : [];
+        const obsNote =
+          observedVariables && observedVariables.length > 0
+            ? unobserved.length === 0
+              ? ' Matches variables observed in workspace analytics.'
+              : ` Warning: recent analytics interactions did not include [${unobserved.join(', ')}]; confirm committed Sarvam Canvas Variables.`
+            : '';
+        dynamicVariableCompatibility = {
+          status: 'VERIFIED',
+          label: 'Dynamic Variable Compatibility',
+          detail: `Canonical profile "${env.SARVAM_AGENT_VARIABLE_PROFILE}" (${allowedKeys.length} outbound variable(s)) passed internal-ID isolation and alias validation.${obsNote}`,
+          blocking: false,
+          source: 'schema',
+        };
+      }
+    } catch (err) {
+      dynamicVariableCompatibility = {
+        status: 'ERROR',
+        label: 'Dynamic Variable Compatibility',
+        detail: err instanceof Error ? err.message : 'Invalid SARVAM_AGENT_VARIABLE_MAP configuration.',
+        blocking: true,
+        source: 'env',
+      };
+    }
+
+    return { webhookReadiness, dynamicVariableCompatibility };
+  }
+
   /**
-   * Read-only preflight verification of Sarvam credentials, org/workspace scope, agent app_id,
-   * committed app_version, telephony connection_id, and caller phone number before allowing any real call.
-   * Never sends an outbound POST call and never unlocks real calling for unverified agents.
+   * Read-only preflight verification separating Instant Outbound readiness from
+   * Inbound Deployment readiness and Bulk Campaign readiness across 7 independent checks.
+   * Never creates deployments/campaigns, never treats Analytics HTTP 200 as telephony readiness,
+   * never requires external Vobiz credentials (supports Rent from Sarvam), and never dials a phone.
    */
   async verifyAgentDeployment(): Promise<SarvamDeploymentVerificationResult> {
     const status = this.getStatus();
+    const { webhookReadiness, dynamicVariableCompatibility } = this.evaluateLocalPreflightChecks();
+
+    const makeUnavailableBaselineChecks = (
+      overrides: Partial<SarvamPreflightChecks>
+    ): SarvamPreflightChecks => ({
+      apiAuthentication: {
+        status: 'ERROR',
+        label: 'API Authentication',
+        detail: 'Not reached due to missing or invalid local Sarvam configuration.',
+        blocking: true,
+      },
+      agentIdAndVersion: {
+        status: 'UNVERIFIED',
+        label: 'Agent ID & Committed Version',
+        detail: 'Could not check workspace agent until API authentication succeeds.',
+        blocking: true,
+      },
+      connectionIdValidity: {
+        status: 'MISSING',
+        label: 'Connection ID Validity',
+        detail: 'Sarvam connection ID configuration was not verified.',
+        blocking: true,
+      },
+      callerNumberAvailability: {
+        status: 'MISSING',
+        label: 'Caller Number Availability',
+        detail: 'Caller phone number configuration was not verified.',
+        blocking: true,
+      },
+      outboundCapability: {
+        status: 'MISSING',
+        label: 'Outbound Capability',
+        detail: 'Outbound telephony readiness requires valid Sarvam configuration and authentication.',
+        blocking: true,
+      },
+      webhookReadiness,
+      dynamicVariableCompatibility,
+      ...overrides,
+    });
+
     if (!status.configured) {
       return {
         verified: false,
+        instantOutboundReady: false,
+        inboundDeploymentReady: false,
+        campaignReady: false,
+        connectionVerificationUnavailable: false,
         status: 'error',
         authCategory: 'CONFIG_MISSING',
         authHeader: 'X-API-Key',
         credentialsSharedWithOutbound: true,
         connectionVerified: false,
         phoneVerified: false,
+        checks: makeUnavailableBaselineChecks({
+          apiAuthentication: {
+            status: 'MISSING',
+            label: 'API Authentication',
+            detail: `Sarvam configuration incomplete: ${status.missingFields.join(', ')}.`,
+            blocking: true,
+            source: 'env',
+          },
+          agentIdAndVersion: {
+            status: 'MISSING',
+            label: 'Agent ID & Committed Version',
+            detail: `Agent / workspace env missing (${status.missingFields.join(', ')}).`,
+            blocking: true,
+            source: 'env',
+          },
+        }),
         message: `Sarvam telephony configuration incomplete: ${status.missingFields.join(', ')}`,
       };
     }
@@ -1279,6 +1486,10 @@ export class SarvamVoiceProvider implements IVoiceProvider {
       const joinedIssues = credDiag.issues.join(' ');
       return {
         verified: false,
+        instantOutboundReady: false,
+        inboundDeploymentReady: false,
+        campaignReady: false,
+        connectionVerificationUnavailable: false,
         status: 'error',
         authCategory: 'KEY_SYNTAX_ERROR',
         upstreamDetail: joinedIssues,
@@ -1287,7 +1498,56 @@ export class SarvamVoiceProvider implements IVoiceProvider {
         credentialsSharedWithOutbound: true,
         connectionVerified: false,
         phoneVerified: false,
+        checks: makeUnavailableBaselineChecks({
+          apiAuthentication: {
+            status: 'ERROR',
+            label: 'API Authentication',
+            detail: `Credential syntax invalid: ${joinedIssues}`,
+            blocking: true,
+            source: 'env',
+          },
+        }),
         message: `Sarvam credential syntax check failed: ${joinedIssues}`,
+      };
+    }
+
+    let configuredPhone = '';
+    try {
+      configuredPhone = normalizeAndValidateE164(
+        env.SARVAM_PHONE_NUMBER,
+        'SARVAM_PHONE_NUMBER'
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Invalid E.164 SARVAM_PHONE_NUMBER';
+      return {
+        verified: false,
+        instantOutboundReady: false,
+        inboundDeploymentReady: false,
+        campaignReady: false,
+        connectionVerificationUnavailable: false,
+        status: 'error',
+        authCategory: 'CONFIGURATION_ERROR',
+        diagnosticHint: msg,
+        authHeader: 'X-API-Key',
+        credentialsSharedWithOutbound: true,
+        connectionVerified: false,
+        phoneVerified: false,
+        checks: makeUnavailableBaselineChecks({
+          apiAuthentication: {
+            status: 'UNVERIFIED',
+            label: 'API Authentication',
+            detail: 'Skipped due to invalid SARVAM_PHONE_NUMBER E.164 format.',
+            blocking: false,
+          },
+          callerNumberAvailability: {
+            status: 'ERROR',
+            label: 'Caller Number Availability',
+            detail: msg,
+            blocking: true,
+            source: 'env',
+          },
+        }),
+        message: msg,
       };
     }
 
@@ -1306,12 +1566,25 @@ export class SarvamVoiceProvider implements IVoiceProvider {
       logger.warn('Sarvam deployment verification network error', { error: msg });
       return {
         verified: false,
+        instantOutboundReady: false,
+        inboundDeploymentReady: false,
+        campaignReady: false,
+        connectionVerificationUnavailable: false,
         status: 'error',
         authCategory: 'NETWORK_ERROR',
         authHeader: 'X-API-Key',
         credentialsSharedWithOutbound: true,
         connectionVerified: false,
         phoneVerified: false,
+        checks: makeUnavailableBaselineChecks({
+          apiAuthentication: {
+            status: 'ERROR',
+            label: 'API Authentication',
+            detail: `Unable to reach Sarvam API: ${msg}`,
+            blocking: true,
+            source: 'deployments',
+          },
+        }),
         message: `Unable to reach Sarvam deployments API: ${msg}`,
       };
     }
@@ -1331,6 +1604,10 @@ export class SarvamVoiceProvider implements IVoiceProvider {
 
       return {
         verified: false,
+        instantOutboundReady: false,
+        inboundDeploymentReady: false,
+        campaignReady: false,
+        connectionVerificationUnavailable: false,
         status: 'error',
         upstreamStatus: response.status,
         authCategory: classification.authCategory,
@@ -1340,18 +1617,32 @@ export class SarvamVoiceProvider implements IVoiceProvider {
         credentialsSharedWithOutbound: true,
         connectionVerified: false,
         phoneVerified: false,
+        checks: makeUnavailableBaselineChecks({
+          apiAuthentication: {
+            status: 'ERROR',
+            label: 'API Authentication',
+            detail: extracted.summary
+              ? `HTTP ${response.status} via X-API-Key: ${extracted.summary}`
+              : `HTTP ${response.status} rejected workspace API key or Org/Workspace ID.`,
+            blocking: true,
+            source: 'deployments',
+          },
+        }),
         message: extracted.summary
           ? `Sarvam API rejected preflight verification (HTTP ${response.status}): ${extracted.summary}`
           : `Sarvam API rejected preflight verification (HTTP ${response.status})`,
       };
     }
 
-    const list = extractPagedItems<SarvamDeploymentRecord>(parsedBody.json, ['deployments']);
-    const configuredPhone = normalizeAndValidateE164(
-      env.SARVAM_PHONE_NUMBER,
-      'SARVAM_PHONE_NUMBER'
-    );
+    const apiAuthCheck: SarvamPreflightCheckItem = {
+      status: 'VERIFIED',
+      label: 'API Authentication',
+      detail: `Authenticated cleanly via X-API-Key for Org ${env.SARVAM_ORG_ID} / Workspace ${env.SARVAM_WORKSPACE_ID}.`,
+      blocking: false,
+      source: 'deployments',
+    };
 
+    const list = extractPagedItems<SarvamDeploymentRecord>(parsedBody.json, ['deployments']);
     const agentDeployments = list.filter((d) => d?.app_id === env.SARVAM_AGENT_ID);
 
     // Enrich active agent deployments that omit connection_configs in list summary
@@ -1377,11 +1668,9 @@ export class SarvamVoiceProvider implements IVoiceProvider {
       (d) => (d.status || '').toLowerCase() === 'active'
     );
 
+    let exactActiveDeployment: SarvamDeploymentRecord | undefined;
     if (activeDeployments.length > 0) {
-      let connectionVerified = false;
-      let phoneVerified = false;
-
-      const exactMatch = activeDeployments.find((d) => {
+      exactActiveDeployment = activeDeployments.find((d) => {
         const versionOk =
           d.app_version === undefined || Number(d.app_version) === env.SARVAM_AGENT_VERSION;
         const conns = Array.isArray(d.connection_configs) ? d.connection_configs : [];
@@ -1391,235 +1680,568 @@ export class SarvamVoiceProvider implements IVoiceProvider {
         if (conns.length > 0) {
           connMatch = conns.some((c) => {
             const idMatch = c.connection_id === env.SARVAM_CONNECTION_ID;
-            if (idMatch) connectionVerified = true;
             const numbers = [
               ...(Array.isArray(c.phone_numbers) ? c.phone_numbers : []),
               ...(typeof c.agent_phone_number === 'string' ? [c.agent_phone_number] : []),
             ];
             const numMatch = numbers.includes(configuredPhone);
-            if (numMatch) phoneVerified = true;
             return idMatch && (numbers.length === 0 || numMatch);
           });
-        } else {
-          connectionVerified = true;
-          if (topPhones.length > 0) {
-            const topMatch = topPhones.includes(configuredPhone);
-            if (topMatch) phoneVerified = true;
-            if ((d.channel_direction || '').toLowerCase() !== 'inbound') {
-              connMatch = topMatch;
-            } else {
-              phoneVerified = true;
-            }
-          } else {
-            phoneVerified = true;
-          }
+        } else if (topPhones.length > 0 && (d.channel_direction || '').toLowerCase() !== 'inbound') {
+          connMatch = topPhones.includes(configuredPhone);
         }
 
         return versionOk && connMatch;
       });
-
-      if (exactMatch) {
-        return {
-          verified: true,
-          status: 'active',
-          authCategory: 'VERIFIED',
-          authHeader: 'X-API-Key',
-          credentialsSharedWithOutbound: true,
-          matchedDeploymentId: exactMatch.deployment_id,
-          matchedAppVersion: exactMatch.app_version ?? env.SARVAM_AGENT_VERSION,
-          connectionVerified: true,
-          phoneVerified: true,
-          message: 'Sarvam agent deployment and Vobiz phone connection are active and verified.',
-        };
-      }
     }
 
-    // Read-only cross-endpoint workspace discovery whenever an active matching deployment was not confirmed
+    // Fast path when an active non-inbound-only deployment confirms agent, version, connection, and caller phone
+    if (
+      exactActiveDeployment &&
+      (exactActiveDeployment.channel_direction || '').toLowerCase() !== 'inbound'
+    ) {
+      const matchedVersion = exactActiveDeployment.app_version ?? env.SARVAM_AGENT_VERSION;
+      const checks: SarvamPreflightChecks = {
+        apiAuthentication: apiAuthCheck,
+        agentIdAndVersion: {
+          status: 'VERIFIED',
+          label: 'Agent ID & Committed Version',
+          detail: `Agent "${env.SARVAM_AGENT_ID}" confirmed at v${matchedVersion} on active deployment ${exactActiveDeployment.deployment_id || ''}.`.trim(),
+          blocking: false,
+          source: 'deployment',
+        },
+        connectionIdValidity: {
+          status: 'VERIFIED',
+          label: 'Connection ID Validity',
+          detail: `Sarvam Vobiz connection "${env.SARVAM_CONNECTION_ID}" confirmed on active deployment.`,
+          blocking: false,
+          source: 'deployment',
+        },
+        callerNumberAvailability: {
+          status: 'VERIFIED',
+          label: 'Caller Number Availability',
+          detail: `Caller number ${maskPhoneSafe(configuredPhone)} verified on connection "${env.SARVAM_CONNECTION_ID}".`,
+          blocking: false,
+          source: 'deployment',
+        },
+        outboundCapability: {
+          status: 'VERIFIED',
+          label: 'Outbound Capability',
+          detail: 'Deployment channel direction and connection configuration confirm outbound telephony capability.',
+          blocking: false,
+          source: 'deployment',
+        },
+        webhookReadiness,
+        dynamicVariableCompatibility,
+      };
+
+      const localBlocked = webhookReadiness.blocking || dynamicVariableCompatibility.blocking;
+      return {
+        verified: !localBlocked,
+        instantOutboundReady: !localBlocked,
+        inboundDeploymentReady: true,
+        campaignReady: false,
+        connectionVerificationUnavailable: false,
+        status: localBlocked ? 'error' : 'active',
+        authCategory: localBlocked ? 'CONFIGURATION_ERROR' : 'VERIFIED',
+        authHeader: 'X-API-Key',
+        credentialsSharedWithOutbound: true,
+        matchedDeploymentId: exactActiveDeployment.deployment_id,
+        matchedAppVersion: matchedVersion,
+        connectionVerified: true,
+        phoneVerified: true,
+        checks,
+        diagnosticHint: localBlocked
+          ? webhookReadiness.blocking
+            ? webhookReadiness.detail
+            : dynamicVariableCompatibility.detail
+          : undefined,
+        message: localBlocked
+          ? `Sarvam deployment verified, but local preflight check failed: ${
+              webhookReadiness.blocking
+                ? webhookReadiness.detail
+                : dynamicVariableCompatibility.detail
+            }`
+          : 'Sarvam Instant Outbound and active Deployment configuration are verified.',
+      };
+    }
+
+    // Read-only cross-endpoint workspace discovery whenever an outbound-capable active deployment did not verify everything
     const { summary: workspaceDiscovery, enrichedCampaignDetails } =
       await this.discoverWorkspaceReadOnly(list, configuredPhone);
 
-    if (agentDeployments.length > 0 && activeDeployments.length === 0) {
-      const statuses = agentDeployments.map((d) => d.status || 'unknown').join(', ');
+    const refinedLocalChecks = this.evaluateLocalPreflightChecks(
+      workspaceDiscovery.observedAgentVariables
+    );
+    const refinedWebhook = refinedLocalChecks.webhookReadiness;
+    const refinedVars = refinedLocalChecks.dynamicVariableCompatibility;
+
+    // 1) Analytics 401/403 must still block auth cleanly
+    if (
+      workspaceDiscovery.analyticsAppCheckStatus === 401 ||
+      workspaceDiscovery.analyticsAppCheckStatus === 403
+    ) {
+      const code = workspaceDiscovery.analyticsAppCheckStatus;
+      const classification = classifySarvamHttpFailure(code, workspaceDiscovery.analyticsAppCheckDetail);
       return {
         verified: false,
-        status: 'inactive',
-        authCategory: 'DEPLOYMENT_INACTIVE',
+        instantOutboundReady: false,
+        inboundDeploymentReady: Boolean(exactActiveDeployment),
+        campaignReady: false,
+        connectionVerificationUnavailable: false,
+        status: 'error',
+        upstreamStatus: code,
+        authCategory: classification.authCategory,
+        upstreamDetail: workspaceDiscovery.analyticsAppCheckDetail,
+        diagnosticHint: classification.diagnosticHint,
         authHeader: 'X-API-Key',
         credentialsSharedWithOutbound: true,
-        connectionVerified: false,
-        phoneVerified: false,
+        connectionVerified: Boolean(exactActiveDeployment),
+        phoneVerified: Boolean(exactActiveDeployment),
         workspaceDiscovery,
-        diagnosticHint: `Activate deployment for "${env.SARVAM_AGENT_ID}" in https://apps.sarvam.ai -> Deploy, or verify committed version v${env.SARVAM_AGENT_VERSION}.`,
-        message: `Sarvam agent deployment is not active (current status: ${statuses}). Resume or activate it in Sarvam dashboard.`,
+        checks: {
+          apiAuthentication: {
+            status: 'ERROR',
+            label: 'API Authentication',
+            detail: workspaceDiscovery.analyticsAppCheckDetail || `Analytics API rejected X-API-Key with HTTP ${code}.`,
+            blocking: true,
+            source: 'analytics',
+          },
+          agentIdAndVersion: {
+            status: 'UNVERIFIED',
+            label: 'Agent ID & Committed Version',
+            detail: 'Could not verify agent ID due to Analytics authentication error.',
+            blocking: true,
+          },
+          connectionIdValidity: {
+            status: exactActiveDeployment ? 'VERIFIED' : 'CONNECTION_VERIFICATION_UNAVAILABLE',
+            label: 'Connection ID Validity',
+            detail: 'Connection verification blocked until authentication succeeds.',
+            blocking: false,
+          },
+          callerNumberAvailability: {
+            status: exactActiveDeployment ? 'VERIFIED' : 'CONNECTION_VERIFICATION_UNAVAILABLE',
+            label: 'Caller Number Availability',
+            detail: 'Caller number verification blocked until authentication succeeds.',
+            blocking: false,
+          },
+          outboundCapability: {
+            status: 'CONNECTION_VERIFICATION_UNAVAILABLE',
+            label: 'Outbound Capability',
+            detail: 'Outbound verification blocked until authentication succeeds.',
+            blocking: false,
+          },
+          webhookReadiness: refinedWebhook,
+          dynamicVariableCompatibility: refinedVars,
+        },
+        message: `Sarvam Analytics API rejected request (HTTP ${code}): ${workspaceDiscovery.analyticsAppCheckDetail || 'Unauthorized'}`,
       };
     }
 
-    if (activeDeployments.length > 0) {
-      const versionsFound = activeDeployments
-        .map((d) => d.app_version)
-        .filter((v): v is number => v !== undefined);
-      const connsFound = workspaceDiscovery.discoveredConnections.map((c) => c.connectionId);
-      return {
-        verified: false,
-        status: 'mismatch',
-        authCategory: 'DEPLOYMENT_MISMATCH',
-        authHeader: 'X-API-Key',
-        credentialsSharedWithOutbound: true,
-        connectionVerified: connsFound.includes(env.SARVAM_CONNECTION_ID),
-        phoneVerified: workspaceDiscovery.discoveredConnections.some(
-          (c) => c.matchesConfiguredPhone
-        ),
-        workspaceDiscovery,
-        diagnosticHint: `Active deployment(s) for "${env.SARVAM_AGENT_ID}" use version(s) [${
-          versionsFound.join(', ') || 'unknown'
-        }] and connection(s) [${connsFound.join(', ') || 'none'}]; env expects v${
-          env.SARVAM_AGENT_VERSION
-        } and "${env.SARVAM_CONNECTION_ID}".`,
-        message:
-          'Active Sarvam deployment exists but does not match configured SARVAM_AGENT_VERSION, SARVAM_CONNECTION_ID, or SARVAM_PHONE_NUMBER.',
-      };
-    }
-
-    // Check if Analytics explicitly rejected app_id with 404
+    // 2) Analytics 404 explicitly proves App ID or Org/Workspace ID does not exist
     const analyticsRejectedApp = workspaceDiscovery.analyticsAppCheckStatus === 404;
-
-    // Check if a Campaign positively verifies app_id + committed app_version + connection_id + phone_number
-    const matchingCampaigns = enrichedCampaignDetails.filter(
-      (c) => (c.app_config?.app_id || c.app_id) === env.SARVAM_AGENT_ID
-    );
-    if (!analyticsRejectedApp && matchingCampaigns.length > 0) {
-      let campaignConnOk = false;
-      let campaignPhoneOk = false;
-
-      const exactCampaign = matchingCampaigns.find((c) => {
-        const ver = c.app_config?.app_version ?? c.app_version;
-        const versionOk = ver !== undefined && Number(ver) === env.SARVAM_AGENT_VERSION;
-        const conns = Array.isArray(c.app_config?.connection_configs)
-          ? c.app_config!.connection_configs!
-          : [];
-        const connOk = conns.some((cfg) => {
-          const idMatch = cfg.connection_id === env.SARVAM_CONNECTION_ID;
-          if (idMatch) campaignConnOk = true;
-          const nums = [
-            ...(Array.isArray(cfg.phone_numbers) ? cfg.phone_numbers : []),
-            ...(typeof cfg.agent_phone_number === 'string' ? [cfg.agent_phone_number] : []),
-          ];
-          const phoneMatch = nums.includes(configuredPhone);
-          if (phoneMatch) campaignPhoneOk = true;
-          return idMatch && (nums.length === 0 || phoneMatch);
-        });
-        return versionOk && connOk;
-      });
-
-      if (exactCampaign) {
-        return {
-          verified: true,
-          status: 'verified_campaign',
-          authCategory: 'VERIFIED',
-          authHeader: 'X-API-Key',
-          credentialsSharedWithOutbound: true,
-          matchedAppVersion:
-            exactCampaign.app_config?.app_version ??
-            exactCampaign.app_version ??
-            env.SARVAM_AGENT_VERSION,
-          connectionVerified: true,
-          phoneVerified: true,
-          workspaceDiscovery,
-          message:
-            'Sarvam agent ID, committed version, and Vobiz connection verified via workspace campaign configuration.',
-        };
-      }
-
-      const foundVersions = Array.from(
-        new Set(
-          matchingCampaigns
-            .map((c) => c.app_config?.app_version ?? c.app_version)
-            .filter((v): v is number => v !== undefined)
-        )
-      );
-      return {
-        verified: false,
-        status: 'mismatch',
-        authCategory: 'DEPLOYMENT_MISMATCH',
-        authHeader: 'X-API-Key',
-        credentialsSharedWithOutbound: true,
-        connectionVerified: campaignConnOk,
-        phoneVerified: campaignPhoneOk,
-        workspaceDiscovery,
-        diagnosticHint: `Agent "${env.SARVAM_AGENT_ID}" exists in workspace Campaigns (versions: [${
-          foundVersions.join(', ') || 'unknown'
-        }]), but version, connection_id, or phone number did not match env configuration.`,
-        message:
-          'Sarvam agent found in workspace campaign history, but committed version or Vobiz connection config does not match environment variables.',
-      };
-    }
-
-    const configuredAppDiscovered = workspaceDiscovery.discoveredApps.find(
-      (a) => a.appId === env.SARVAM_AGENT_ID
-    );
-    const otherAppIds = workspaceDiscovery.discoveredApps
-      .filter((a) => a.appId !== env.SARVAM_AGENT_ID)
-      .map((a) => `${a.appId}${a.versions.length ? ` (v${a.versions.join(', v')})` : ''}`);
-
-    if (!configuredAppDiscovered || analyticsRejectedApp) {
+    if (analyticsRejectedApp) {
+      const otherAppIds = workspaceDiscovery.discoveredApps
+        .filter((a) => a.appId !== env.SARVAM_AGENT_ID)
+        .map((a) => `${a.appId}${a.versions.length ? ` (v${a.versions.join(', v')})` : ''}`);
       const candidateText =
         otherAppIds.length > 0
           ? ` Discovered agent ID(s) in this workspace: ${otherAppIds.join('; ')}.`
           : ' Zero deployments, campaigns, experiments, or test suites matched any app_id under this SARVAM_ORG_ID + SARVAM_WORKSPACE_ID.';
 
+      const connMatch = workspaceDiscovery.discoveredConnections.find(
+        (c) => c.matchesConfiguredConnectionId
+      );
+      const phoneMatch = Boolean(connMatch?.matchesConfiguredPhone);
+
       return {
         verified: false,
+        instantOutboundReady: false,
+        inboundDeploymentReady: false,
+        campaignReady: false,
+        connectionVerificationUnavailable: !connMatch,
         status: 'not_found',
         authCategory: 'APP_NOT_FOUND_IN_WORKSPACE',
-        upstreamStatus: analyticsRejectedApp ? 404 : undefined,
+        upstreamStatus: 404,
         upstreamDetail: workspaceDiscovery.analyticsAppCheckDetail,
         authHeader: 'X-API-Key',
         credentialsSharedWithOutbound: true,
-        connectionVerified: workspaceDiscovery.discoveredConnections.some(
-          (c) => c.matchesConfiguredConnectionId
-        ),
-        phoneVerified: workspaceDiscovery.discoveredConnections.some(
-          (c) => c.matchesConfiguredPhone
-        ),
+        connectionVerified: Boolean(connMatch),
+        phoneVerified: phoneMatch,
         workspaceDiscovery,
+        checks: {
+          apiAuthentication: apiAuthCheck,
+          agentIdAndVersion: {
+            status: 'NOT_FOUND',
+            label: 'Agent ID & Committed Version',
+            detail:
+              workspaceDiscovery.analyticsAppCheckDetail ||
+              `Sarvam returned HTTP 404: App "${env.SARVAM_AGENT_ID}" not found under Org "${env.SARVAM_ORG_ID}" / Workspace "${env.SARVAM_WORKSPACE_ID}".`,
+            blocking: true,
+            source: 'analytics',
+          },
+          connectionIdValidity: connMatch
+            ? {
+                status: 'VERIFIED',
+                label: 'Connection ID Validity',
+                detail: `Connection "${env.SARVAM_CONNECTION_ID}" found in workspace ${connMatch.source}.`,
+                blocking: false,
+                source: connMatch.source,
+              }
+            : {
+                status: 'CONNECTION_VERIFICATION_UNAVAILABLE',
+                label: 'Connection ID Validity',
+                detail:
+                  'Sarvam exposes no read-only GET /connections endpoint; Rent-from-Sarvam connection was not in Deployments or Campaigns.',
+                blocking: false,
+              },
+          callerNumberAvailability: connMatch
+            ? {
+                status: phoneMatch ? 'VERIFIED' : 'MISMATCH',
+                label: 'Caller Number Availability',
+                detail: phoneMatch
+                  ? `Caller ${maskPhoneSafe(configuredPhone)} matches connection "${env.SARVAM_CONNECTION_ID}".`
+                  : `Caller ${maskPhoneSafe(configuredPhone)} did not match phone numbers on connection "${env.SARVAM_CONNECTION_ID}".`,
+                blocking: !phoneMatch,
+                source: connMatch.source,
+              }
+            : {
+                status: 'CONNECTION_VERIFICATION_UNAVAILABLE',
+                label: 'Caller Number Availability',
+                detail:
+                  'Sarvam exposes no read-only GET /phone-numbers endpoint for Rent-from-Sarvam numbers.',
+                blocking: false,
+              },
+          outboundCapability: {
+            status: 'CONNECTION_VERIFICATION_UNAVAILABLE',
+            label: 'Outbound Capability',
+            detail:
+              'Sarvam exposes no read-only GET outbound-capability endpoint; and configured app_id returned HTTP 404.',
+            blocking: false,
+          },
+          webhookReadiness: refinedWebhook,
+          dynamicVariableCompatibility: refinedVars,
+        },
         diagnosticHint:
-          `App "${env.SARVAM_AGENT_ID}" could not be verified in Org "${env.SARVAM_ORG_ID}" / Workspace "${env.SARVAM_WORKSPACE_ID}". Do not copy the browser URL slug: open the agent in https://apps.sarvam.ai, click "···" -> "Copy agent ID", commit a non-Draft version, confirm Org & Workspace IDs in URL/Settings, and link the agent to an active Deployment or Campaign before enabling real calls.${candidateText}`,
+          `App "${env.SARVAM_AGENT_ID}" was rejected (HTTP 404) in Org "${env.SARVAM_ORG_ID}" / Workspace "${env.SARVAM_WORKSPACE_ID}". Do not copy the browser URL slug: open the agent in https://apps.sarvam.ai, click "···" -> "Copy agent ID", commit a non-Draft version, and verify Org & Workspace IDs match.${candidateText}`,
         message: `Sarvam Agent ID "${env.SARVAM_AGENT_ID}" was not found or verified in the configured workspace. Live calling remains locked until verified.`,
       };
     }
 
-    // Configured app_id was found in Experiments / Test Suites / Analytics, but not yet verified via Deployment or Campaign connection_config
-    const versionMismatch =
-      configuredAppDiscovered.versions.length > 0 &&
-      !configuredAppDiscovered.versions.includes(env.SARVAM_AGENT_VERSION);
+    // 3) Evaluate Bulk Campaign readiness separately
+    const matchingCampaigns = enrichedCampaignDetails.filter(
+      (c) => (c.app_config?.app_id || c.app_id) === env.SARVAM_AGENT_ID
+    );
+    const exactCampaign = matchingCampaigns.find((c) => {
+      const ver = c.app_config?.app_version ?? c.app_version;
+      const versionOk = ver !== undefined && Number(ver) === env.SARVAM_AGENT_VERSION;
+      const conns = Array.isArray(c.app_config?.connection_configs)
+        ? c.app_config!.connection_configs!
+        : [];
+      const connOk = conns.some((cfg) => {
+        const idMatch = cfg.connection_id === env.SARVAM_CONNECTION_ID;
+        const nums = [
+          ...(Array.isArray(cfg.phone_numbers) ? cfg.phone_numbers : []),
+          ...(typeof cfg.agent_phone_number === 'string' ? [cfg.agent_phone_number] : []),
+        ];
+        const phoneMatch = nums.includes(configuredPhone);
+        return idMatch && (nums.length === 0 || phoneMatch);
+      });
+      return versionOk && connOk;
+    });
 
+    const inboundDeploymentReady = Boolean(exactActiveDeployment);
+    const campaignReady = Boolean(exactCampaign);
+
+    // 4) Evaluate Connection ID & Caller Number against discovered Deployment/Campaign connection_configs
+    const configuredConnSummary = workspaceDiscovery.discoveredConnections.find(
+      (c) => c.matchesConfiguredConnectionId
+    );
+    const configuredAppDiscovered = workspaceDiscovery.discoveredApps.find(
+      (a) => a.appId === env.SARVAM_AGENT_ID
+    );
+
+    let connectionVerified = Boolean(configuredConnSummary);
+    let phoneVerified = Boolean(configuredConnSummary?.matchesConfiguredPhone);
+    let connectionIdValidity: SarvamPreflightCheckItem;
+    let callerNumberAvailability: SarvamPreflightCheckItem;
+
+    if (configuredConnSummary) {
+      connectionIdValidity = {
+        status: 'VERIFIED',
+        label: 'Connection ID Validity',
+        detail: `Sarvam connection "${env.SARVAM_CONNECTION_ID}" confirmed in workspace ${configuredConnSummary.source} config.`,
+        blocking: false,
+        source: configuredConnSummary.source,
+      };
+      if (configuredConnSummary.phoneNumbersMasked.length > 0) {
+        if (configuredConnSummary.matchesConfiguredPhone) {
+          callerNumberAvailability = {
+            status: 'VERIFIED',
+            label: 'Caller Number Availability',
+            detail: `Caller number ${maskPhoneSafe(configuredPhone)} verified on connection "${env.SARVAM_CONNECTION_ID}".`,
+            blocking: false,
+            source: configuredConnSummary.source,
+          };
+        } else {
+          callerNumberAvailability = {
+            status: 'MISMATCH',
+            label: 'Caller Number Availability',
+            detail: `Connection "${env.SARVAM_CONNECTION_ID}" lists phone(s) [${configuredConnSummary.phoneNumbersMasked.join(', ')}], which does not match SARVAM_PHONE_NUMBER (${maskPhoneSafe(configuredPhone)}).`,
+            blocking: true,
+            source: configuredConnSummary.source,
+          };
+        }
+      } else {
+        callerNumberAvailability = {
+          status: 'CONNECTION_VERIFICATION_UNAVAILABLE',
+          label: 'Caller Number Availability',
+          detail: `Connection "${env.SARVAM_CONNECTION_ID}" had no phone list in ${configuredConnSummary.source}; Sarvam exposes no GET /phone-numbers API for Rent-from-Sarvam numbers.`,
+          blocking: false,
+        };
+      }
+    } else if (
+      exactActiveDeployment &&
+      Array.isArray(exactActiveDeployment.phone_numbers) &&
+      exactActiveDeployment.phone_numbers.includes(configuredPhone)
+    ) {
+      connectionVerified = true;
+      phoneVerified = true;
+      connectionIdValidity = {
+        status: 'VERIFIED',
+        label: 'Connection ID Validity',
+        detail: `Inbound deployment ${exactActiveDeployment.deployment_id || ''} linked without conflicting connection ID.`,
+        blocking: false,
+        source: 'deployment',
+      };
+      callerNumberAvailability = {
+        status: 'VERIFIED',
+        label: 'Caller Number Availability',
+        detail: `Caller number ${maskPhoneSafe(configuredPhone)} verified on deployment ${exactActiveDeployment.deployment_id || ''}.`,
+        blocking: false,
+        source: 'deployment',
+      };
+    } else {
+      const analyticsCallerNote =
+        workspaceDiscovery.analyticsCallerPhonesMasked &&
+        workspaceDiscovery.analyticsCallerPhonesMasked.includes(maskPhoneSafe(configuredPhone))
+          ? ` Historical analytics calls also show caller ${maskPhoneSafe(configuredPhone)} (informational only; does not substitute for a telephony phone-catalog API).`
+          : '';
+      connectionIdValidity = {
+        status: 'CONNECTION_VERIFICATION_UNAVAILABLE',
+        label: 'Connection ID Validity',
+        detail: `Sarvam does not expose a read-only GET /connections endpoint. Rent-from-Sarvam connection "${env.SARVAM_CONNECTION_ID}" was not attached to an Inbound Deployment or Campaign (not required for Instant Outbound).`,
+        blocking: false,
+      };
+      callerNumberAvailability = {
+        status: 'CONNECTION_VERIFICATION_UNAVAILABLE',
+        label: 'Caller Number Availability',
+        detail: `Sarvam does not expose a read-only GET /phone-numbers endpoint. Caller ${maskPhoneSafe(configuredPhone)} passed E.164 syntax validation; Rent-from-Sarvam assignment is evaluated by POST /outbounds.${analyticsCallerNote}`,
+        blocking: false,
+      };
+    }
+
+    // 5) Evaluate Outbound Capability (Campaigns or non-inbound Deployments ONLY — never Analytics HTTP 200)
+    const outboundCapability: SarvamPreflightCheckItem = exactCampaign
+      ? {
+          status: 'VERIFIED',
+          label: 'Outbound Capability',
+          detail: `Connection "${env.SARVAM_CONNECTION_ID}" and caller ${maskPhoneSafe(configuredPhone)} confirmed for outbound calling via workspace campaign configuration.`,
+          blocking: false,
+          source: 'campaign',
+        }
+      : {
+          status: 'CONNECTION_VERIFICATION_UNAVAILABLE',
+          label: 'Outbound Capability',
+          detail:
+            'Sarvam exposes no read-only endpoint to test outbound capability of a Rent-from-Sarvam (Sarvam Vobiz) connection without placing a call. Instant Outbound (POST /api/outbounds) does not require a Campaign ID or Deployment ID, and requires no external Vobiz credentials.',
+          blocking: false,
+        };
+
+    // 6) Evaluate Agent ID & Committed Version cleanly without false 404 or conflating Analytics 200 with telephony
+    const analyticsOk =
+      typeof workspaceDiscovery.analyticsAppCheckStatus === 'number' &&
+      workspaceDiscovery.analyticsAppCheckStatus >= 200 &&
+      workspaceDiscovery.analyticsAppCheckStatus < 300;
+    const discoveredVersions = configuredAppDiscovered?.versions ?? [];
+    const versionMatched = discoveredVersions.includes(env.SARVAM_AGENT_VERSION);
+    const versionMismatched = discoveredVersions.length > 0 && !versionMatched;
+
+    let agentIdAndVersion: SarvamPreflightCheckItem;
+    if (versionMismatched) {
+      agentIdAndVersion = {
+        status: 'MISMATCH',
+        label: 'Agent ID & Committed Version',
+        detail: `Agent "${env.SARVAM_AGENT_ID}" was discovered at version(s) [v${discoveredVersions.join(', v')}], which does not match SARVAM_AGENT_VERSION=${env.SARVAM_AGENT_VERSION}.`,
+        blocking: true,
+        source: configuredAppDiscovered?.sources.join('/'),
+      };
+    } else if (versionMatched) {
+      agentIdAndVersion = {
+        status: 'VERIFIED',
+        label: 'Agent ID & Committed Version',
+        detail: `Agent "${env.SARVAM_AGENT_ID}" verified at committed v${env.SARVAM_AGENT_VERSION} via workspace ${configuredAppDiscovered?.sources.join('/') || 'metadata'}.`,
+        blocking: false,
+        source: configuredAppDiscovered?.sources.join('/'),
+      };
+    } else if (analyticsOk) {
+      agentIdAndVersion = {
+        status: 'UNVERIFIED',
+        label: 'Agent ID & Committed Version',
+        detail: `Sarvam Analytics recognized "${env.SARVAM_AGENT_ID}" (HTTP ${workspaceDiscovery.analyticsAppCheckStatus}, ${workspaceDiscovery.analyticsTotalInteractions ?? 0} recent interactions), confirming the app exists. Because Sarvam exposes no GET /apps version endpoint and no Deployment/Campaign/Experiment surfaced versions yet, committed v${env.SARVAM_AGENT_VERSION} cannot be pre-verified until the first call.`,
+        blocking: false,
+        source: 'analytics',
+      };
+    } else {
+      agentIdAndVersion = {
+        status: 'UNVERIFIED',
+        label: 'Agent ID & Committed Version',
+        detail: `Agent "${env.SARVAM_AGENT_ID}" was not found in Deployments/Campaigns/Experiments and Analytics returned HTTP ${workspaceDiscovery.analyticsAppCheckStatus ?? 0}.`,
+        blocking: true,
+        source: 'workspace-discovery',
+      };
+    }
+
+    const checks: SarvamPreflightChecks = {
+      apiAuthentication: apiAuthCheck,
+      agentIdAndVersion,
+      connectionIdValidity,
+      callerNumberAvailability,
+      outboundCapability,
+      webhookReadiness: refinedWebhook,
+      dynamicVariableCompatibility: refinedVars,
+    };
+
+    const anyBlocking = Object.values(checks).some((c) => c.blocking);
+    const connectionVerificationUnavailable = [
+      checks.connectionIdValidity,
+      checks.callerNumberAvailability,
+      checks.outboundCapability,
+    ].some((c) => c.status === 'CONNECTION_VERIFICATION_UNAVAILABLE');
+
+    const instantOutboundReady = !anyBlocking;
+    const verified =
+      instantOutboundReady &&
+      !connectionVerificationUnavailable &&
+      checks.agentIdAndVersion.status === 'VERIFIED';
+
+    // Exact Campaign verification branch
+    if (campaignReady && !anyBlocking && exactCampaign) {
+      return {
+        verified: true,
+        instantOutboundReady: true,
+        inboundDeploymentReady,
+        campaignReady: true,
+        connectionVerificationUnavailable: false,
+        status: 'verified_campaign',
+        authCategory: 'VERIFIED',
+        authHeader: 'X-API-Key',
+        credentialsSharedWithOutbound: true,
+        matchedDeploymentId: exactActiveDeployment?.deployment_id,
+        matchedAppVersion:
+          exactCampaign.app_config?.app_version ??
+          exactCampaign.app_version ??
+          env.SARVAM_AGENT_VERSION,
+        connectionVerified: true,
+        phoneVerified: true,
+        checks,
+        workspaceDiscovery,
+        message:
+          'Sarvam agent ID, committed version, and Sarvam Vobiz connection verified via workspace campaign configuration.',
+      };
+    }
+
+    if (agentIdAndVersion.status === 'MISMATCH' || callerNumberAvailability.status === 'MISMATCH') {
+      return {
+        verified: false,
+        instantOutboundReady: false,
+        inboundDeploymentReady,
+        campaignReady,
+        connectionVerificationUnavailable,
+        status: 'mismatch',
+        authCategory: 'DEPLOYMENT_MISMATCH',
+        authHeader: 'X-API-Key',
+        credentialsSharedWithOutbound: true,
+        connectionVerified,
+        phoneVerified,
+        checks,
+        workspaceDiscovery,
+        diagnosticHint:
+          agentIdAndVersion.status === 'MISMATCH'
+            ? `${agentIdAndVersion.detail} Commit v${env.SARVAM_AGENT_VERSION} in Sarvam Canvas or update SARVAM_AGENT_VERSION.`
+            : `${callerNumberAvailability.detail} Verify connection ID and rented phone number in Sarvam Deploy -> Phone Numbers (Rent from Sarvam).`,
+        message:
+          agentIdAndVersion.status === 'MISMATCH'
+            ? `Sarvam agent "${env.SARVAM_AGENT_ID}" version mismatch against SARVAM_AGENT_VERSION=${env.SARVAM_AGENT_VERSION}. Instant Outbound remains locked.`
+            : 'Sarvam caller phone number conflicts with phone number(s) registered on the configured connection. Instant Outbound remains locked.',
+      };
+    }
+
+    if (agentIdAndVersion.blocking) {
+      return {
+        verified: false,
+        instantOutboundReady: false,
+        inboundDeploymentReady,
+        campaignReady,
+        connectionVerificationUnavailable,
+        status: 'unverified',
+        authCategory: 'AGENT_UNVERIFIED_IN_WORKSPACE',
+        authHeader: 'X-API-Key',
+        credentialsSharedWithOutbound: true,
+        connectionVerified,
+        phoneVerified,
+        checks,
+        workspaceDiscovery,
+        diagnosticHint: agentIdAndVersion.detail,
+        message: `Unable to verify Sarvam agent "${env.SARVAM_AGENT_ID}" in workspace. Live calling remains locked.`,
+      };
+    }
+
+    if (refinedWebhook.blocking || refinedVars.blocking) {
+      return {
+        verified: false,
+        instantOutboundReady: false,
+        inboundDeploymentReady,
+        campaignReady,
+        connectionVerificationUnavailable,
+        status: 'error',
+        authCategory: 'CONFIGURATION_ERROR',
+        authHeader: 'X-API-Key',
+        credentialsSharedWithOutbound: true,
+        connectionVerified,
+        phoneVerified,
+        checks,
+        workspaceDiscovery,
+        diagnosticHint: refinedWebhook.blocking ? refinedWebhook.detail : refinedVars.detail,
+        message: refinedWebhook.blocking ? refinedWebhook.detail : refinedVars.detail,
+      };
+    }
+
+    // All verifiable Instant Outbound checks pass! Neither Inbound Deployment nor Campaign is required.
     return {
-      verified: false,
-      status: versionMismatch ? 'mismatch' : 'unverified',
-      authCategory: versionMismatch
-        ? 'DEPLOYMENT_MISMATCH'
-        : 'AGENT_UNVERIFIED_IN_WORKSPACE',
+      verified,
+      instantOutboundReady: true,
+      inboundDeploymentReady,
+      campaignReady,
+      connectionVerificationUnavailable,
+      status: connectionVerificationUnavailable ? 'instant_outbound_ready' : 'active',
+      authCategory: connectionVerificationUnavailable
+        ? 'CONNECTION_VERIFICATION_UNAVAILABLE'
+        : 'VERIFIED',
       authHeader: 'X-API-Key',
       credentialsSharedWithOutbound: true,
-      connectionVerified: false,
-      phoneVerified: configuredAppDiscovered.matchesPhoneNumber ?? false,
+      matchedDeploymentId: exactActiveDeployment?.deployment_id,
+      matchedAppVersion:
+        versionMatched ? env.SARVAM_AGENT_VERSION : undefined,
+      connectionVerified,
+      phoneVerified,
+      checks,
       workspaceDiscovery,
-      diagnosticHint: versionMismatch
-        ? `Agent "${env.SARVAM_AGENT_ID}" was seen at version(s) [${configuredAppDiscovered.versions.join(
-            ', '
-          )}], which does not match SARVAM_AGENT_VERSION=${
-            env.SARVAM_AGENT_VERSION
-          }. Commit the version in Sarvam Canvas and verify SARVAM_AGENT_VERSION.`
-        : `Agent "${env.SARVAM_AGENT_ID}" appeared in workspace ${configuredAppDiscovered.sources.join(
-            '/'
-          )}, but no active Deployment or Campaign confirms both committed v${
-            env.SARVAM_AGENT_VERSION
-          } and telephony connection "${
-            env.SARVAM_CONNECTION_ID
-          }". Create an active Deployment in Sarvam Deploy -> Inbounds (or verify connection config) to unlock live calling.`,
-      message: versionMismatch
-        ? `Sarvam agent "${env.SARVAM_AGENT_ID}" version mismatch against SARVAM_AGENT_VERSION=${env.SARVAM_AGENT_VERSION}. Live calling remains locked.`
-        : `Sarvam agent "${env.SARVAM_AGENT_ID}" is not yet backed by a verified Deployment or Campaign connection config. Live calling remains locked until verified.`,
+      diagnosticHint:
+        'Instant Outbound (POST /api/outbounds) does not require a Campaign ID or active Inbound Deployment. Because Rent from Sarvam manages Sarvam Vobiz natively in Deploy -> Phone Numbers (with no external Vobiz credentials and no GET /connections endpoint), connection outbound capability is evaluated by Sarvam when initiating a supervised test call.',
+      message: connectionVerificationUnavailable
+        ? 'Instant Outbound prerequisites verified; Sarvam exposes no read-only endpoint to pre-verify Rent-from-Sarvam connection outbound capability (CONNECTION_VERIFICATION_UNAVAILABLE). Ready for supervised Instant Outbound test.'
+        : 'Sarvam Instant Outbound configuration verified.',
     };
   }
 

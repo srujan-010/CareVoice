@@ -535,12 +535,20 @@ export async function getCallPreflight(options: { verifyDeployment?: boolean } =
     deploymentCheck = await verifySarvamAgentDeployment();
   }
 
+  const instantOutboundReady =
+    baseStatus.telephonyReady &&
+    baseStatus.webhookReady &&
+    (!deploymentCheck || deploymentCheck.instantOutboundReady);
+
   return {
     ...baseStatus,
-    liveCallingAllowed:
-      baseStatus.telephonyReady &&
-      baseStatus.webhookReady &&
-      (!deploymentCheck || deploymentCheck.verified),
+    liveCallingAllowed: instantOutboundReady,
+    instantOutboundReady,
+    inboundDeploymentReady: deploymentCheck?.inboundDeploymentReady ?? false,
+    campaignReady: deploymentCheck?.campaignReady ?? false,
+    connectionVerificationUnavailable:
+      deploymentCheck?.connectionVerificationUnavailable ?? false,
+    preflightChecks: deploymentCheck?.checks ?? null,
     deploymentCheck,
   };
 }
@@ -825,9 +833,9 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
     );
   }
 
-  // Verify Sarvam agent deployment & phone connection via official Sarvam API
+  // Verify Sarvam Instant Outbound readiness (API auth, app_id, committed version, webhook, variables & non-conflicting connection)
   const deploymentCheck = await verifySarvamAgentDeployment();
-  if (!deploymentCheck.verified) {
+  if (!deploymentCheck.instantOutboundReady) {
     throw new AppError(
       deploymentCheck.message,
       deploymentCheck.upstreamStatus ? 502 : 503,
