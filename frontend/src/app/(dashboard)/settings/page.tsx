@@ -9,6 +9,7 @@ import { Input, SelectNative } from '@/components/ui/input';
 import { apiRequest } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { COMMON_TIMEZONES } from '@/lib/constants';
+import { formatConfigFieldLabel, getVoiceModeHeaderLabel } from '@/lib/voiceDisplay';
 import type { UserRole } from '@/types';
 
 interface CaregiverItem {
@@ -129,11 +130,11 @@ export default function SettingsPage() {
   return (
     <div className="space-y-6 animate-fade-up">
       <div>
-        <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
-          Platform & Safety Settings
+        <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900">
+          Platform &amp; Safety Settings
         </h1>
         <p className="text-sm text-slate-500">
-          Manage family workspace configuration, caregiver access roles, and Sarvam voice readiness.
+          Manage family workspace configuration, caregiver access roles, and CareVoice voice service readiness.
         </p>
       </div>
 
@@ -171,7 +172,7 @@ export default function SettingsPage() {
                   ))}
                 </SelectNative>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="mb-1 block text-xs font-semibold text-slate-700">
                     Escalation Window (min)
@@ -206,7 +207,7 @@ export default function SettingsPage() {
                 </p>
               ) : null}
               {isAdmin ? (
-                <Button type="submit" disabled={savingFamily}>
+                <Button type="submit" disabled={savingFamily} className="w-full sm:w-auto">
                   {savingFamily ? 'Saving...' : 'Save Workspace Settings'}
                 </Button>
               ) : null}
@@ -218,40 +219,40 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <PhoneCall className="h-4 w-4 text-blue-600" />
-              Sarvam Voice & System Readiness
+              Voice Service &amp; System Readiness
             </CardTitle>
             <CardDescription>
-              Credentials remain securely in backend environment variables only
+              Service credentials remain securely isolated in server configuration only
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="rounded-xl border border-sky-100 bg-sky-50/50 p-4 space-y-2 text-xs sm:text-sm">
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-700">MongoDB Atlas</span>
+            <div className="rounded-xl border border-sky-100 bg-sky-50/50 p-4 space-y-2.5 text-xs sm:text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold text-slate-700">Patient Database</span>
                 <Badge variant={healthInfo?.database?.connected ? 'success' : 'warning'}>
-                  {healthInfo?.database?.state || 'checking'}
+                  {healthInfo?.database?.connected ? 'Connected' : healthInfo?.database?.state || 'Checking'}
                 </Badge>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-700">Voice Provider Mode</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold text-slate-700">Voice Service Mode</span>
                 <Badge variant={healthInfo?.telephony?.ready ? 'success' : 'default'}>
-                  {healthInfo?.telephony?.mode?.toUpperCase() || 'MOCK'}
+                  {getVoiceModeHeaderLabel(healthInfo?.telephony?.mode)}
                 </Badge>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-700">Real Telephony</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold text-slate-700">Call Service Status</span>
                 <Badge variant={healthInfo?.telephony?.ready ? 'success' : 'neutral'}>
                   {healthInfo?.telephony?.ready ? 'Enabled' : 'Safely Disabled'}
                 </Badge>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-700">Authenticated Webhook</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold text-slate-700">Call Event Connection</span>
                 <Badge variant={healthInfo?.telephony?.webhookReady ? 'success' : 'warning'}>
                   {healthInfo?.telephony?.webhookReady ? 'HTTPS Ready' : 'Not Configured'}
                 </Badge>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-700">Mock Sandbox Mode</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold text-slate-700">Test Environment Simulation</span>
                 <Badge variant={healthInfo?.telephony?.mockSimulationAllowed ? 'warning' : 'neutral'}>
                   {healthInfo?.telephony?.mockSimulationAllowed
                     ? 'Allowed (Dev/Testing)'
@@ -262,13 +263,17 @@ export default function SettingsPage() {
 
             {healthInfo?.telephony && !healthInfo.telephony.ready ? (
               <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 text-xs text-amber-800 space-y-1">
-                <p className="font-bold">Missing backend configuration for live telephony:</p>
-                <p>{healthInfo.telephony.missingFields.join(', ')}</p>
+                <p className="font-bold">Missing server configuration for live voice calling:</p>
+                <p>
+                  {healthInfo.telephony.missingFields.map(formatConfigFieldLabel).join(', ')}
+                </p>
                 {healthInfo.telephony.missingWebhookFields &&
-                healthInfo.telephony.missingWebhookFields.length > 0 ? (
+                  healthInfo.telephony.missingWebhookFields.length > 0 ? (
                   <p className="pt-1">
-                    <strong>Missing webhook/deployment config:</strong>{' '}
-                    {healthInfo.telephony.missingWebhookFields.join(', ')}
+                    <strong>Missing call event configuration:</strong>{' '}
+                    {healthInfo.telephony.missingWebhookFields
+                      .map(formatConfigFieldLabel)
+                      .join(', ')}
                   </p>
                 ) : null}
               </div>
@@ -303,13 +308,13 @@ export default function SettingsPage() {
             {caregivers.map((cg) => (
               <div
                 key={cg.id}
-                className="rounded-xl border border-sky-100 bg-sky-50/40 p-3.5 flex items-center justify-between"
+                className="rounded-xl border border-sky-100 bg-sky-50/40 p-3.5 flex items-center justify-between gap-2 min-w-0"
               >
-                <div>
-                  <p className="text-sm font-bold text-slate-900">{cg.name}</p>
-                  <p className="text-xs text-slate-500">{cg.email}</p>
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-slate-900 truncate">{cg.name}</p>
+                  <p className="text-xs text-slate-500 truncate">{cg.email}</p>
                 </div>
-                <Badge variant="default">{cg.role}</Badge>
+                <Badge variant="default" className="shrink-0">{cg.role}</Badge>
               </div>
             ))}
           </div>
@@ -317,7 +322,7 @@ export default function SettingsPage() {
           {isAdmin ? (
             <form
               onSubmit={handleAddCaregiver}
-              className="rounded-2xl border border-sky-100 bg-sky-50/30 p-4 grid grid-cols-1 sm:grid-cols-5 gap-3 items-end"
+              className="rounded-2xl border border-sky-100 bg-sky-50/30 p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end"
             >
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">Name</label>
@@ -360,7 +365,7 @@ export default function SettingsPage() {
                   <option value="ADMIN">ADMIN</option>
                 </SelectNative>
               </div>
-              <Button type="submit">
+              <Button type="submit" className="w-full sm:col-span-2 lg:col-span-1">
                 <UserPlus className="h-4 w-4" />
                 Add User
               </Button>

@@ -95,10 +95,12 @@ export function getLanguageLabel(code: string): string {
 export function getCallLifecycleBadgeVariant(
   status?: CallLifecycleStatus
 ): 'success' | 'danger' | 'warning' | 'indigo' | 'neutral' {
+  if (!status) return 'neutral';
   if (status === 'COMPLETED') return 'success';
   if (
     status === 'FAILED' ||
     status === 'REJECTED' ||
+    status === 'PROVIDER_UNAVAILABLE' ||
     status === 'LANGUAGE_UNAVAILABLE'
   ) {
     return 'danger';
@@ -131,12 +133,12 @@ export const CONSENT_TYPE_META: Record<
     description:
       'Independent consent to store turn-by-turn call transcripts and structured patient dialogue variables.',
     retentionNote:
-      'Revoking or denying CALL_TRANSCRIPT immediately purges stored transcript turns and agent variables.',
+      'Revoking or denying CALL_TRANSCRIPT immediately purges stored transcript turns and conversation variables.',
   },
   CALL_RECORDING: {
     title: 'Audio Recording Access & Storage (CALL_RECORDING)',
     description:
-      'Independent consent to store or proxy authorized call audio playback from the voice provider.',
+      'Independent consent to store and access authorized call audio playback.',
     retentionNote:
       'Revoking or denying CALL_RECORDING immediately deletes stored recording records and blocks audio playback.',
   },

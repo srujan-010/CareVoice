@@ -43,6 +43,8 @@ const SARVAM_WEBHOOK_ACCEPTED_STATUSES = [
   'unreachable',
   'cancelled',
   'canceled',
+  'provider_unavailable',
+  'service_unavailable',
 ] as const;
 
 const normalizedSarvamStatusSchema = z

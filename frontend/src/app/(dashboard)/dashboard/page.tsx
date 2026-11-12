@@ -28,6 +28,13 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { apiRequest } from '@/lib/api';
 import { DOSE_STATUS_META, getLanguageLabel } from '@/lib/constants';
 import { formatDateTimeInTz } from '@/lib/utils';
+import {
+  formatConfigFieldLabel,
+  getCallModeDisplay,
+  getCallOutcomeDisplay,
+  getCallTypeDisplay,
+  getVoiceModeHeaderLabel,
+} from '@/lib/voiceDisplay';
 import type { DashboardOverviewData } from '@/types';
 
 export default function DashboardOverviewPage() {
@@ -146,8 +153,8 @@ export default function DashboardOverviewPage() {
     <div className="space-y-6 animate-fade-up">
       {/* Header row */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
+        <div className="min-w-0">
+          <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900">
             Family Care Overview
           </h1>
           <p className="text-sm text-slate-500">
@@ -155,18 +162,18 @@ export default function DashboardOverviewPage() {
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
-          <Button variant="outline" size="sm" onClick={loadOverview}>
+        <div className="flex flex-col min-[420px]:flex-row min-[420px]:flex-wrap items-stretch min-[420px]:items-center gap-2.5">
+          <Button variant="outline" size="sm" onClick={loadOverview} className="w-full min-[420px]:w-auto">
             <RefreshCw className="h-3.5 w-3.5" />
             Refresh
           </Button>
-          <Button asChild size="sm" variant="secondary">
+          <Button asChild size="sm" variant="secondary" className="w-full min-[420px]:w-auto">
             <Link href="/family">
               <Plus className="h-3.5 w-3.5" />
               Manage Family
             </Link>
           </Button>
-          <Button asChild size="sm">
+          <Button asChild size="sm" className="w-full min-[420px]:w-auto">
             <Link href="/medicines">
               <Pill className="h-3.5 w-3.5" />
               Add Medicine
@@ -175,31 +182,37 @@ export default function DashboardOverviewPage() {
         </div>
       </div>
 
-      {/* Voice provider mode banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-sky-200 bg-gradient-to-r from-sky-50 via-white to-blue-50 px-5 py-3.5 shadow-sm">
-        <div className="flex items-center gap-3">
+      {/* Voice service mode banner */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-sky-200 bg-gradient-to-r from-sky-50 via-white to-blue-50 px-4 sm:px-5 py-3.5 shadow-sm">
+        <div className="flex items-start sm:items-center gap-3 min-w-0">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-700">
             <PhoneCall className="h-4 w-4" />
           </div>
-          <div>
-            <p className="text-xs sm:text-sm font-bold text-slate-900">
-              Voice Integration Mode:{' '}
-              <span className="text-blue-700 uppercase">{data.environment.voiceMode}</span>
+          <div className="min-w-0">
+            <p className="text-xs sm:text-sm font-bold text-slate-900 break-words">
+              Voice Service Mode:{' '}
+              <span className="text-blue-700">
+                {data.environment.telephonyReady
+                  ? 'Live Voice Calling'
+                  : getVoiceModeHeaderLabel(data.environment.voiceMode)}
+              </span>
             </p>
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-slate-500 break-words">
               {data.environment.telephonyReady
-                ? 'Sarvam Vobiz telephony is enabled and ready for scheduled calls and Admin real test calls.'
-                : `Real telephone dialing is safely locked (${
-                    data.environment.missingTelephonyConfig?.join(', ') || 'mock mode active'
+                ? 'CareVoice Voice Service is active and ready for scheduled patient calls and Admin test calls.'
+                : `Live voice calling is safely disabled (${
+                    data.environment.missingTelephonyConfig
+                      ?.map(formatConfigFieldLabel)
+                      .join(', ') || 'test environment active'
                   }).${
                     data.environment.mockSimulationAllowed
-                      ? ' Mock sandbox simulation is available in Voice Calls.'
+                      ? ' Test Environment simulation is available in Voice Calls.'
                       : ''
                   }`}
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <Button asChild variant="outline" size="sm">
             <Link href="/calls">Voice Calls</Link>
           </Button>
@@ -210,7 +223,7 @@ export default function DashboardOverviewPage() {
       </div>
 
       {/* 8 KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 min-[420px]:grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
         {kpis.map((kpi) => {
           const Icon = kpi.icon;
           return (
@@ -310,15 +323,15 @@ export default function DashboardOverviewPage() {
                   <Link
                     key={member.id}
                     href={`/family/${member.id}`}
-                    className="flex items-center justify-between rounded-xl border border-sky-100 bg-sky-50/35 px-4 py-3 transition-colors hover:bg-sky-50"
+                    className="flex flex-col min-[420px]:flex-row min-[420px]:items-center justify-between gap-2 rounded-xl border border-sky-100 bg-sky-50/35 px-4 py-3 transition-colors hover:bg-sky-50"
                   >
-                    <div>
-                      <p className="text-sm font-bold text-slate-900">{member.fullName}</p>
-                      <p className="text-xs text-slate-500">
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-slate-900 break-words">{member.fullName}</p>
+                      <p className="text-xs text-slate-500 break-words">
                         {member.relationship} • {getLanguageLabel(member.preferredLanguage)}
                       </p>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 shrink-0">
                       <Badge variant={member.isActive ? 'success' : 'neutral'}>
                         {member.isActive ? 'Active' : 'Inactive'}
                       </Badge>
@@ -361,18 +374,20 @@ export default function DashboardOverviewPage() {
                   return (
                     <div
                       key={String(call._id)}
-                      className="flex items-center justify-between rounded-xl border border-sky-100 bg-white px-4 py-3"
+                      className="flex flex-col min-[420px]:flex-row min-[420px]:items-center justify-between gap-2 rounded-xl border border-sky-100 bg-white px-4 py-3"
                     >
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-slate-900 break-words">
                           {member?.fullName || 'Patient'} — {med?.name || 'Medicine'}
                         </p>
                         <p className="text-xs text-slate-500">
-                          {String(call.callType).replace(/_/g, ' ')} •{' '}
+                          {getCallTypeDisplay(String(call.callType || ''))} •{' '}
                           {formatDateTimeInTz(call.scheduledFor as string)}
                         </p>
                       </div>
-                      <Badge variant="default">Queued</Badge>
+                      <Badge variant="default" className="self-start min-[420px]:self-auto shrink-0">
+                        Queued
+                      </Badge>
                     </div>
                   );
                 })}
@@ -397,7 +412,7 @@ export default function DashboardOverviewPage() {
               <EmptyState
                 icon={PhoneCall}
                 title="No voice calls placed yet"
-                description="Use the Voice Calls console to simulate or inspect AI reminder conversations."
+                description="Use the Voice Calls console to monitor calls or inspect AI reminder conversations."
                 action={
                   <Button asChild size="sm" variant="secondary">
                     <Link href="/calls">Open Voice Calls</Link>
@@ -409,22 +424,31 @@ export default function DashboardOverviewPage() {
                 {data.sections.recentCallHistory.map((log) => {
                   const member = log.familyMemberId as { fullName?: string } | undefined;
                   const med = log.medicineId as { name?: string } | undefined;
+                  const modeDisplay = getCallModeDisplay(
+                    Boolean(log.isMock) || String(log.mode || '') === 'mock'
+                  );
+                  const outcomeDisplay = getCallOutcomeDisplay(String(log.outcome || ''));
                   return (
                     <Link
                       key={String(log._id)}
                       href={`/calls/${String(log._id)}`}
-                      className="flex items-center justify-between rounded-xl border border-sky-100 bg-white px-4 py-3 hover:bg-sky-50/50 transition-colors"
+                      className="flex flex-col min-[420px]:flex-row min-[420px]:items-center justify-between gap-2 rounded-xl border border-sky-100 bg-white px-4 py-3 hover:bg-sky-50/50 transition-colors"
                     >
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">
-                          {member?.fullName || 'Patient'} • {med?.name || 'Dose Call'}
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-slate-900 break-words">
+                          {member?.fullName || 'Patient'} • {med?.name || 'Reminder Call'}
                         </p>
                         <p className="text-xs text-slate-500">
                           {getLanguageLabel(String(log.language || 'en'))} •{' '}
                           {formatDateTimeInTz(log.createdAt as string)}
                         </p>
                       </div>
-                      <Badge variant="indigo">{String(log.outcome || 'UNKNOWN')}</Badge>
+                      <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                        <Badge variant={modeDisplay.badgeVariant}>{modeDisplay.shortLabel}</Badge>
+                        <Badge variant={outcomeDisplay.badgeVariant}>
+                          {outcomeDisplay.label}
+                        </Badge>
+                      </div>
                     </Link>
                   );
                 })}
@@ -459,16 +483,18 @@ export default function DashboardOverviewPage() {
                   return (
                     <div
                       key={String(esc._id)}
-                      className="flex items-center justify-between rounded-xl border border-rose-200 bg-rose-50/60 px-4 py-3"
+                      className="flex flex-col min-[420px]:flex-row min-[420px]:items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50/60 px-4 py-3"
                     >
-                      <div>
-                        <p className="text-sm font-bold text-rose-900">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-rose-900 break-words">
                           {member?.fullName || 'Patient'} —{' '}
                           {String(esc.reason || 'ESCALATION').replace(/_/g, ' ')}
                         </p>
-                        <p className="text-xs text-rose-700">{String(esc.description || '')}</p>
+                        <p className="text-xs text-rose-700 break-words">{String(esc.description || '')}</p>
                       </div>
-                      <Badge variant="danger">{String(esc.severity || 'HIGH')}</Badge>
+                      <Badge variant="danger" className="self-start min-[420px]:self-auto shrink-0">
+                        {String(esc.severity || 'HIGH')}
+                      </Badge>
                     </div>
                   );
                 })}
@@ -480,10 +506,10 @@ export default function DashboardOverviewPage() {
                   return (
                     <div
                       key={String(dose._id)}
-                      className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50/50 px-4 py-3"
+                      className="flex flex-col min-[420px]:flex-row min-[420px]:items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50/50 px-4 py-3"
                     >
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-slate-900 break-words">
                           {member?.fullName || 'Patient'} • {med?.name || 'Medicine'}
                           {med?.dosage ? ` (${med.dosage})` : ''}
                         </p>
@@ -491,7 +517,9 @@ export default function DashboardOverviewPage() {
                           {formatDateTimeInTz(dose.scheduledAt as string)}
                         </p>
                       </div>
-                      <Badge variant="warning">{meta?.label || statusKey}</Badge>
+                      <Badge variant="warning" className="self-start min-[420px]:self-auto shrink-0">
+                        {meta?.label || statusKey}
+                      </Badge>
                     </div>
                   );
                 })}

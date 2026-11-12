@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
@@ -39,10 +39,24 @@ interface SidebarProps {
 export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
   const pathname = usePathname();
 
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCloseMobile();
+    };
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [mobileOpen, onCloseMobile]);
+
   const navContent = (
     <div className="flex h-full flex-col bg-white border-r border-sky-100">
       {/* Brand header */}
-      <div className="flex h-16 items-center justify-between border-b border-sky-100 px-5">
+      <div className="flex h-16 items-center justify-between border-b border-sky-100 px-4 sm:px-5">
         <Link href="/dashboard" className="flex items-center gap-2.5" onClick={onCloseMobile}>
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-sky-500 text-white shadow-sm shadow-blue-600/25">
             <HeartHandshake className="h-5 w-5" />
@@ -58,7 +72,7 @@ export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
         </Link>
         <button
           onClick={onCloseMobile}
-          className="rounded-lg p-1.5 text-slate-400 hover:bg-sky-50 hover:text-blue-600 lg:hidden"
+          className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl text-slate-500 hover:bg-sky-50 hover:text-blue-600 lg:hidden"
           aria-label="Close navigation"
         >
           <X className="h-5 w-5" />
@@ -78,7 +92,7 @@ export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
               href={item.href}
               onClick={onCloseMobile}
               className={cn(
-                'flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-semibold transition-all duration-150',
+                'flex min-h-[44px] items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-semibold transition-all duration-150',
                 active
                   ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white shadow-sm shadow-blue-600/25'
                   : 'text-slate-600 hover:bg-sky-50 hover:text-blue-700'

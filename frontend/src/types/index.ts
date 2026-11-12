@@ -46,6 +46,7 @@ export type MedicineFrequency =
   | 'CUSTOM';
 
 export type CallType = 'MEAL_REMINDER' | 'MEDICINE_REMINDER' | 'CONFIRMATION_CALL' | 'CALLBACK';
+export type CallTypeFilter = CallType | 'ADMIN_TEST_CALL';
 
 export type CallLifecycleStatus =
   | 'QUEUED'
@@ -60,8 +61,20 @@ export type CallLifecycleStatus =
   | 'REJECTED'
   | 'NOT_CONNECTED'
   | 'CANCELLED'
+  | 'PROVIDER_UNAVAILABLE'
   | 'LANGUAGE_UNAVAILABLE'
   | 'LANGUAGE_FALLBACK_REQUIRED';
+
+export interface TodayLiveCallStats {
+  dateLocal: string;
+  timezone: string;
+  totalCalls: number;
+  successfullyConnected: number;
+  noAnswer: number;
+  failedCalls: number;
+  pendingCallbacks: number;
+  mockCallsToday?: number;
+}
 
 export type CallOutcome =
   | 'PENDING'

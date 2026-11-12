@@ -170,9 +170,108 @@ describe('CareVoice End-to-End API & Security Integration Tests', () => {
         preferredLanguage: 'hi',
         timezone: 'Asia/Kolkata',
         relationship: 'Father',
-        emergencyContact: { name: 'X', phoneNumber: '+919876500002', relationship: 'Son' },
+        emergencyContact: { name: 'Ananya', phoneNumber: '+919876500002', relationship: 'Son' },
       });
     expect(forbiddenAdd.status).toBe(403);
+
+    // Reject invalid phone numbers with 422 and specific fieldPaths
+    const invalidPhoneRes = await request(app)
+      .post('/api/family-members')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({
+        fullName: 'Bad Phone Patient',
+        phoneNumber: '9876500004',
+        preferredLanguage: 'hi',
+        timezone: 'Asia/Kolkata',
+        relationship: 'Father',
+        emergencyContact: {
+          name: 'Ananya Sharma',
+          phoneNumber: '12345',
+          relationship: 'Daughter',
+        },
+      });
+    expect(invalidPhoneRes.status).toBe(422);
+    expect(invalidPhoneRes.body.details?.fieldPaths?.phoneNumber?.length).toBeGreaterThan(0);
+    expect(
+      invalidPhoneRes.body.details?.fieldPaths?.['emergencyContact.phoneNumber']?.length
+    ).toBeGreaterThan(0);
+
+    // Preserve Hindi and Marathi languages & compact formatted E.164 numbers
+    const hindiRes = await request(app)
+      .post('/api/family-members')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({
+        fullName: 'Ramesh Sharma',
+        phoneNumber: '+91 98765-00003',
+        preferredLanguage: 'hi',
+        timezone: 'Asia/Kolkata',
+        relationship: 'Father',
+        emergencyContact: {
+          name: 'Ananya Sharma',
+          phoneNumber: '+91 (98765) 00002',
+          relationship: 'Daughter',
+        },
+      });
+    expect(hindiRes.status).toBe(201);
+    expect(hindiRes.body.data.phoneNumber).toBe('+919876500003');
+    expect(hindiRes.body.data.preferredLanguage).toBe('hi');
+
+    const marathiRes = await request(app)
+      .post('/api/family-members')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({
+        fullName: 'Sunita Kulkarni',
+        phoneNumber: '+919876500004',
+        preferredLanguage: 'mr',
+        timezone: 'Asia/Kolkata',
+        relationship: 'Grandmother',
+        emergencyContact: {
+          name: 'Ananya Sharma',
+          phoneNumber: '+919876500002',
+          relationship: 'Granddaughter',
+        },
+      });
+    expect(marathiRes.status).toBe(201);
+    expect(marathiRes.body.data.preferredLanguage).toBe('mr');
+
+    // PATCH preserves existing calling preferences when partial callingPreferences passed
+    const patchRes = await request(app)
+      .patch(`/api/family-members/${marathiRes.body.data.id}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({
+        callingPreferences: { maxRetries: 4 },
+      });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.data.callingPreferences.maxRetries).toBe(4);
+    expect(patchRes.body.data.callingPreferences.retryIntervalMinutes).toBe(10);
+
+    // Reject duplicate phone within same family with 409
+    const dupPhoneRes = await request(app)
+      .post('/api/family-members')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({
+        fullName: 'Duplicate Phone',
+        phoneNumber: '+919876500001',
+        preferredLanguage: 'en',
+        timezone: 'Asia/Kolkata',
+        relationship: 'Relative',
+        emergencyContact: {
+          name: 'Ananya Sharma',
+          phoneNumber: '+919876500002',
+          relationship: 'Cousin',
+        },
+      });
+    expect(dupPhoneRes.status).toBe(409);
+
+    // Clean up extra test members so downstream dashboard counts remain deterministic
+    await request(app)
+      .delete(`/api/family-members/${hindiRes.body.data.id}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+      .expect(200);
+    await request(app)
+      .delete(`/api/family-members/${marathiRes.body.data.id}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+      .expect(200);
   });
 
   it('creates multi-dose medicine and generates deduplicated dose instances & call jobs', async () => {

@@ -25,6 +25,7 @@ const simulateSchema = z.object({
 });
 
 router.get('/', callController.listCalls);
+router.get('/stats/today', callController.getTodayCallStats);
 router.post(
   '/simulate',
   authorizeRoles('ADMIN', 'CAREGIVER'),

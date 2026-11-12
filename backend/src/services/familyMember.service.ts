@@ -509,10 +509,11 @@ export async function updateFamilyMember(
   }
 
   if (input.callingPreferences) {
-    member.callingPreferences = {
-      ...member.callingPreferences,
+    const existingPrefs = member.toObject().callingPreferences ?? {};
+    member.set('callingPreferences', {
+      ...existingPrefs,
       ...input.callingPreferences,
-    };
+    });
   }
 
   const consentNow = new Date();

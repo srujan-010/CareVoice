@@ -67,8 +67,8 @@ export default function MedicinesPage() {
   return (
     <div className="space-y-6 animate-fade-up">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
+        <div className="min-w-0">
+          <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900">
             Medicine Prescriptions
           </h1>
           <p className="text-sm text-slate-500">
@@ -76,8 +76,8 @@ export default function MedicinesPage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
-          <Button asChild variant="outline">
+        <div className="flex flex-col min-[420px]:flex-row min-[420px]:flex-wrap items-stretch min-[420px]:items-center gap-2.5">
+          <Button asChild variant="outline" className="w-full min-[420px]:w-auto">
             <Link href="/schedules">
               <CalendarClock className="h-4 w-4" />
               View Dose Timeline
@@ -89,6 +89,7 @@ export default function MedicinesPage() {
                 setEditingMed(null);
                 setDialogOpen(true);
               }}
+              className="w-full min-[420px]:w-auto"
             >
               <Plus className="h-4 w-4" />
               Add Medicine
@@ -213,7 +214,7 @@ export default function MedicinesPage() {
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between pt-2 border-t border-sky-100 text-xs text-slate-500">
+                  <div className="flex flex-col min-[420px]:flex-row min-[420px]:items-center justify-between gap-2.5 pt-2 border-t border-sky-100 text-xs text-slate-500">
                     <span>Frequency: {med.frequency.replace(/_/g, ' ')}</span>
                     <div className="flex items-center gap-2">
                       {canEdit ? (

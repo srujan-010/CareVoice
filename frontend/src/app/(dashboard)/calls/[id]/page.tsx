@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import {
@@ -9,6 +9,7 @@ import {
   Bot,
   CheckCircle2,
   Clock3,
+  Download,
   Globe2,
   Loader2,
   Mic,
@@ -28,6 +29,20 @@ import { API_BASE, apiRequest, getStoredToken } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { getCallLifecycleBadgeVariant, getLanguageLabel } from '@/lib/constants';
 import { formatDateTimeInTz } from '@/lib/utils';
+import {
+  formatSafetyFlagLabel,
+  getCallLifecycleDisplay,
+  getCallModeDisplay,
+  getCallOutcomeDisplay,
+  getLanguageStatusDisplay,
+  getRawServiceStatusDisplay,
+  getRecordingStatusDisplay,
+  getTranscriptSourceDisplay,
+  getTranscriptStatusDisplay,
+  getWebhookEventSourceDisplay,
+  sanitizeVoiceText,
+  translateVoiceError,
+} from '@/lib/voiceDisplay';
 import type { CallLifecycleStatus, LanguageStatus, TranscriptStatus } from '@/types';
 
 interface CallDetailPayload {
@@ -165,6 +180,23 @@ const ACTIVE_STATUSES: CallLifecycleStatus[] = [
   'IN_PROGRESS',
 ];
 
+function formatTimelineSource(source: string): string {
+  switch (source) {
+    case 'WEBHOOK':
+      return 'Call Event';
+    case 'ANALYTICS_SYNC':
+      return 'Status Sync';
+    case 'SYSTEM':
+      return 'System';
+    case 'ADMIN':
+      return 'Admin';
+    case 'MOCK':
+      return 'Test Env';
+    default:
+      return source.replace(/_/g, ' ');
+  }
+}
+
 export default function CallDetailPage() {
   const params = useParams<{ id: string }>();
   const callId = params?.id;
@@ -174,16 +206,23 @@ export default function CallDetailPage() {
   const [detail, setDetail] = useState<CallDetailPayload | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [recordingFetchNote, setRecordingFetchNote] = useState<string | null>(null);
+  const [downloadingAudio, setDownloadingAudio] = useState(false);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const pollInFlightRef = useRef(false);
 
   const loadDetail = useCallback(
     async (silent = false, reconcile = false) => {
       if (!callId) return;
-      if (!silent) setLoading(true);
-      setError(null);
+      if (silent && pollInFlightRef.current) return;
+      if (silent) {
+        pollInFlightRef.current = true;
+      } else {
+        setLoading(true);
+        setError(null);
+      }
       try {
         const suffix = reconcile ? '?reconcile=true' : '';
         const data = await apiRequest<CallDetailPayload>(`/calls/${callId}${suffix}`);
@@ -211,7 +250,9 @@ export default function CallDetailPage() {
             if (!res.ok) {
               const maybeErr = await res.json().catch(() => null);
               if (maybeErr?.error?.message) {
-                setRecordingFetchNote(String(maybeErr.error.message));
+                setRecordingFetchNote(
+                  translateVoiceError(String(maybeErr.error.message), 'Unable to load audio.')
+                );
               }
             }
           }
@@ -219,9 +260,20 @@ export default function CallDetailPage() {
           setAudioUrl(null);
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unable to load call details');
+        if (!silent) {
+          setError(
+            translateVoiceError(
+              err instanceof Error ? err.message : undefined,
+              'Unable to load call details.'
+            )
+          );
+        }
       } finally {
-        if (!silent) setLoading(false);
+        if (silent) {
+          pollInFlightRef.current = false;
+        } else {
+          setLoading(false);
+        }
       }
     },
     [callId]
@@ -236,13 +288,10 @@ export default function CallDetailPage() {
   }, [loadDetail]);
 
   const currentLifecycle = detail?.callLog.callStatus;
-  const isCallActive = Boolean(
-    currentLifecycle && ACTIVE_STATUSES.includes(currentLifecycle)
-  );
+  const isCallActive = Boolean(currentLifecycle && ACTIVE_STATUSES.includes(currentLifecycle));
   const isRecentLiveAsyncPending = Boolean(
     detail?.callLog.mode === 'live' &&
       !detail.callLog.isMock &&
-      detail.callLog.provider === 'sarvam' &&
       detail.callLog.callStatus === 'COMPLETED' &&
       ((detail.callLog.transcriptConsentGranted &&
         !detail.callLog.transcriptAvailable &&
@@ -272,7 +321,12 @@ export default function CallDetailPage() {
       setDetail(updated);
       await loadDetail(true, false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to reconcile with Sarvam Analytics');
+      setError(
+        translateVoiceError(
+          err instanceof Error ? err.message : undefined,
+          'Unable to sync call status.'
+        )
+      );
     } finally {
       setSyncing(false);
     }
@@ -290,9 +344,50 @@ export default function CallDetailPage() {
       });
       await loadDetail(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to cancel active call');
+      setError(
+        translateVoiceError(
+          err instanceof Error ? err.message : undefined,
+          'Failed to cancel active call.'
+        )
+      );
     } finally {
       setCancelling(false);
+    }
+  };
+
+  const handleDownloadRecording = async () => {
+    if (!callId) return;
+    setDownloadingAudio(true);
+    try {
+      const token = getStoredToken();
+      const res = await fetch(`${API_BASE}/calls/${callId}/recording?download=true`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        credentials: 'include',
+      });
+      if (!res.ok) {
+        const maybeErr = await res.json().catch(() => null);
+        setRecordingFetchNote(
+          translateVoiceError(
+            maybeErr?.error?.message ? String(maybeErr.error.message) : undefined,
+            'Unable to download audio recording.'
+          )
+        );
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('content-disposition') || '';
+      const filenameMatch = disposition.match(/filename="?([^"]+)"?/i);
+      const filename = filenameMatch?.[1] || `carevoice-call-${callId}.wav`;
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(downloadUrl);
+    } finally {
+      setDownloadingAudio(false);
     }
   };
 
@@ -309,9 +404,9 @@ export default function CallDetailPage() {
     return (
       <Card>
         <CardContent className="p-8 text-center space-y-3">
-          <p className="text-sm font-semibold text-rose-700">{error || 'Call log not found'}</p>
+          <p className="text-sm font-semibold text-rose-700">{error || 'Call record not found'}</p>
           <Button asChild variant="outline">
-            <Link href="/calls">Back to Call Logs</Link>
+            <Link href="/calls">Back to Voice Call Management</Link>
           </Button>
         </CardContent>
       </Card>
@@ -320,61 +415,78 @@ export default function CallDetailPage() {
 
   const { callLog, conversation, recording, escalations, callbacks } = detail;
   const isMockCall = callLog.isMock ?? callLog.mode === 'mock';
-  const lifecycleStatus = callLog.callStatus ?? 'COMPLETED';
+  const modeDisplay = getCallModeDisplay(isMockCall);
+  const lifecycleDisplay = getCallLifecycleDisplay(callLog.callStatus);
+  const outcomeDisplay = getCallOutcomeDisplay(callLog.outcome);
   const requestedLang = callLog.requestedLanguage || callLog.language;
   const actualLang = callLog.actualLanguageUsed || conversation?.actualLanguageUsed;
+  const patientName = callLog.familyMemberId?.fullName || 'Patient';
+
   const transcriptAllowed =
     callLog.transcriptConsentGranted !== false &&
     callLog.transcriptStatus !== 'CONSENT_DENIED' &&
     callLog.familyMemberId?.transcriptConsentStatus !== 'DENIED' &&
     callLog.familyMemberId?.transcriptConsentStatus !== 'REVOKED';
+
   const audioConsentGranted =
     (callLog.audioRecordingConsentGranted ?? callLog.recordingConsentGranted) !== false &&
     callLog.recordingStatus !== 'CONSENT_DENIED';
 
+  const recStatusDisplay = getRecordingStatusDisplay(callLog.recordingStatus);
+  const txStatusDisplay = getTranscriptStatusDisplay(
+    callLog.transcriptStatus ?? (callLog.transcriptAvailable ? 'AVAILABLE' : undefined)
+  );
+  const txSourceDisplay = getTranscriptSourceDisplay(
+    callLog.transcriptSource || conversation?.transcriptSource
+  );
+  const langStatusDisplay = getLanguageStatusDisplay(callLog.languageStatus);
+
   return (
     <div className="space-y-6 animate-fade-up">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <Button asChild variant="outline" size="icon">
+        <div className="flex items-start sm:items-center gap-3 min-w-0">
+          <Button asChild variant="outline" size="icon" className="shrink-0">
             <Link href="/calls">
               <ArrowLeft className="h-4 w-4" />
             </Link>
           </Button>
-          <div>
+          <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
-                {callLog.familyMemberId?.fullName || 'Patient'} — Voice Call Detail
+              <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900 break-words">
+                {patientName} — Voice Call Detail
               </h1>
-              <Badge variant={isMockCall ? 'warning' : 'success'}>
-                {isMockCall ? 'MOCK SANDBOX' : 'LIVE SARVAM'}
+              <Badge variant={modeDisplay.badgeVariant}>
+                {isMockCall ? 'TEST ENVIRONMENT' : 'LIVE VOICE'}
               </Badge>
-              {callLog.isTestCall ? <Badge variant="default">TEST CALL</Badge> : null}
-              <Badge variant={getCallLifecycleBadgeVariant(lifecycleStatus)}>
+              {callLog.isTestCall ? <Badge variant="default">ADMIN TEST CALL</Badge> : null}
+              <Badge variant={getCallLifecycleBadgeVariant(callLog.callStatus)}>
                 {isCallActive ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                {lifecycleStatus}
+                {lifecycleDisplay.label}
               </Badge>
-              <Badge variant="neutral">Outcome: {callLog.outcome}</Badge>
+              <Badge variant={outcomeDisplay.badgeVariant}>
+                Outcome: {outcomeDisplay.label}
+              </Badge>
             </div>
-            <p className="text-sm text-slate-500">
-              {callLog.medicineId?.name} ({callLog.medicineId?.dosage}) •{' '}
-              {callLog.doseInstanceId?.slotLabel} • {getLanguageLabel(requestedLang)}
-              {callLog.callPurpose ? ` • ${callLog.callPurpose}` : ''}
+            <p className="mt-1 text-xs sm:text-sm text-slate-500 break-words">
+              {callLog.medicineId?.name || 'Medicine'}
+              {callLog.medicineId?.dosage ? ` (${callLog.medicineId.dosage})` : ''} •{' '}
+              {callLog.doseInstanceId?.slotLabel || 'Dose'} • {getLanguageLabel(requestedLang)}
+              {callLog.callPurpose ? ` • ${sanitizeVoiceText(callLog.callPurpose)}` : ''}
             </p>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {!isMockCall && callLog.provider === 'sarvam' ? (
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          {!isMockCall && callLog.mode === 'live' ? (
             <Button variant="outline" size="sm" onClick={handleManualSync} disabled={syncing}>
               <RefreshCw className={`h-3.5 w-3.5 ${syncing ? 'animate-spin' : ''}`} />
-              {syncing ? 'Syncing Sarvam...' : 'Sync with Sarvam'}
+              {syncing ? 'Syncing Status...' : 'Sync Call Status'}
             </Button>
           ) : null}
           <Button
             variant="outline"
             size="sm"
-            onClick={() => loadDetail(false, !isMockCall && callLog.provider === 'sarvam')}
+            onClick={() => loadDetail(false, !isMockCall && callLog.mode === 'live')}
           >
             <RefreshCw className="h-3.5 w-3.5" />
             Refresh
@@ -400,10 +512,9 @@ export default function CallDetailPage() {
             Independent Call Permissions
           </p>
           <div className="flex flex-wrap gap-2">
-            <Badge
-              variant={callLog.voiceCallingConsentGranted !== false ? 'success' : 'danger'}
-            >
-              Automated Calls: {callLog.voiceCallingConsentGranted !== false ? 'GRANTED' : 'BLOCKED'}
+            <Badge variant={callLog.voiceCallingConsentGranted !== false ? 'success' : 'danger'}>
+              Automated Calls:{' '}
+              {callLog.voiceCallingConsentGranted !== false ? 'GRANTED' : 'BLOCKED'}
             </Badge>
             <Badge variant={transcriptAllowed ? 'success' : 'warning'}>
               Transcript Storage:{' '}
@@ -419,7 +530,7 @@ export default function CallDetailPage() {
             </Badge>
           </div>
           <p className="text-[11px] text-slate-600">
-            Calling, Transcript Storage, and Audio Recording are strictly independent. Denying
+            Calling, Transcript Storage, and Audio Recording are strictly independent. Denying audio
             recording never hides an authorized transcript, and revoking transcript or recording
             purges saved records.
           </p>
@@ -439,21 +550,10 @@ export default function CallDetailPage() {
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs font-bold uppercase tracking-wide text-slate-800 flex items-center gap-1.5">
               <Globe2 className="h-3.5 w-3.5 text-blue-600" />
-              Language Enforcement & Verification
+              Language Enforcement &amp; Verification
             </p>
             {callLog.languageStatus ? (
-              <Badge
-                variant={
-                  callLog.languageStatus === 'MATCHED'
-                    ? 'success'
-                    : callLog.languageStatus === 'LANGUAGE_MISMATCH' ||
-                        callLog.languageStatus === 'LANGUAGE_UNAVAILABLE'
-                      ? 'danger'
-                      : 'warning'
-                }
-              >
-                {callLog.languageStatus.replace(/_/g, ' ')}
-              </Badge>
+              <Badge variant={langStatusDisplay.badgeVariant}>{langStatusDisplay.label}</Badge>
             ) : null}
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-700">
@@ -461,8 +561,8 @@ export default function CallDetailPage() {
               <strong>Requested:</strong> {getLanguageLabel(requestedLang)}
             </span>
             <span>
-              <strong>Actual Spoken (Sarvam):</strong>{' '}
-              {actualLang ? getLanguageLabel(actualLang) : 'Awaiting provider metadata'}
+              <strong>Actual Spoken:</strong>{' '}
+              {actualLang ? getLanguageLabel(actualLang) : 'Awaiting call completion'}
             </span>
             {callLog.fallbackLanguage ? (
               <span>
@@ -472,9 +572,9 @@ export default function CallDetailPage() {
           </div>
           {callLog.languageStatus === 'LANGUAGE_MISMATCH' ? (
             <p className="text-[11px] font-semibold text-rose-800">
-              Mismatch detected: Sarvam reported speaking {getLanguageLabel(actualLang || '')} instead
-              of {getLanguageLabel(requestedLang)}. Check that {getLanguageLabel(requestedLang)} and a
-              matching voice are enabled in Sarvam Canvas → Language personalisation.
+              Language mismatch detected: Call spoken language ({getLanguageLabel(actualLang || '')}
+              ) differed from requested language ({getLanguageLabel(requestedLang)}). Please verify
+              CareVoice voice configuration before placing subsequent calls.
             </p>
           ) : null}
         </div>
@@ -532,7 +632,7 @@ export default function CallDetailPage() {
 
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Call Telemetry & Provider State</CardTitle>
+            <CardTitle className="text-sm">Call Telemetry &amp; Service State</CardTitle>
           </CardHeader>
           <CardContent className="text-xs text-slate-600 space-y-1">
             <p>
@@ -549,7 +649,9 @@ export default function CallDetailPage() {
               <strong>Ended:</strong>{' '}
               {callLog.endedAt
                 ? formatDateTimeInTz(callLog.endedAt, callLog.familyMemberId?.timezone)
-                : 'Awaiting completion'}
+                : isCallActive
+                  ? 'In progress'
+                  : 'Awaiting completion'}
             </p>
             <p>
               <strong>Duration:</strong> {callLog.durationSeconds} seconds
@@ -562,36 +664,31 @@ export default function CallDetailPage() {
             ) : null}
             {callLog.lastReconciledAt ? (
               <p>
-                <strong>Last Sarvam Sync:</strong>{' '}
+                <strong>Last Synced:</strong>{' '}
                 {formatDateTimeInTz(callLog.lastReconciledAt, callLog.familyMemberId?.timezone)}
               </p>
             ) : null}
             {callLog.attemptId ? (
-              <p className="truncate">
-                <strong>Sarvam Attempt ID:</strong> {callLog.attemptId}
+              <p className="break-all">
+                <strong>Call Reference ID:</strong> {callLog.attemptId}
               </p>
             ) : null}
             {callLog.sarvamStatus || callLog.providerStatusRaw ? (
               <p>
-                <strong>Sarvam Provider Status:</strong>{' '}
-                {callLog.sarvamStatus || callLog.providerStatusRaw}
-              </p>
-            ) : null}
-            {callLog.interactionId ? (
-              <p className="truncate">
-                <strong>Interaction ID:</strong> {callLog.interactionId}
+                <strong>Voice Service Status:</strong>{' '}
+                {getRawServiceStatusDisplay(callLog.sarvamStatus || callLog.providerStatusRaw)}
               </p>
             ) : null}
             {callLog.failureReason ? (
               <p className="text-rose-700">
-                <strong>Failure / Cancel Reason:</strong> {callLog.failureReason}
+                <strong>Voice Service Error:</strong> {translateVoiceError(callLog.failureReason)}
               </p>
             ) : null}
           </CardContent>
         </Card>
       </div>
 
-      {/* Call Lifecycle Timeline & Webhook Events */}
+      {/* Call Lifecycle Timeline & Call Event Deliveries */}
       {(callLog.statusHistory && callLog.statusHistory.length > 0) ||
       (callLog.webhookEvents && callLog.webhookEvents.length > 0) ? (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -603,26 +700,32 @@ export default function CallDetailPage() {
                   Call Lifecycle Timeline
                 </CardTitle>
                 <CardDescription>
-                  Audit trail across QUEUED, INITIATING, RINGING, ANSWERED, IN_PROGRESS, and
-                  terminal outcomes
+                  Verified stage transitions from queued initiation through terminal outcome
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-2.5">
-                {callLog.statusHistory.map((evt, idx) => (
-                  <div
-                    key={idx}
-                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-xl border border-sky-100 bg-sky-50/40 px-4 py-2.5 text-xs"
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant={getCallLifecycleBadgeVariant(evt.status)}>{evt.status}</Badge>
-                      <Badge variant="neutral">{evt.source}</Badge>
-                      {evt.note ? <span className="text-slate-700">{evt.note}</span> : null}
+                {callLog.statusHistory.map((evt, idx) => {
+                  const stageDisplay = getCallLifecycleDisplay(evt.status);
+                  return (
+                    <div
+                      key={idx}
+                      className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-xl border border-sky-100 bg-sky-50/40 px-4 py-2.5 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={getCallLifecycleBadgeVariant(evt.status)}>
+                          {stageDisplay.label}
+                        </Badge>
+                        <Badge variant="neutral">{formatTimelineSource(evt.source)}</Badge>
+                        {evt.note ? (
+                          <span className="text-slate-700">{sanitizeVoiceText(evt.note)}</span>
+                        ) : null}
+                      </div>
+                      <span className="text-slate-500 shrink-0">
+                        {formatDateTimeInTz(evt.timestamp, callLog.familyMemberId?.timezone)}
+                      </span>
                     </div>
-                    <span className="text-slate-500 shrink-0">
-                      {formatDateTimeInTz(evt.timestamp, callLog.familyMemberId?.timezone)}
-                    </span>
-                  </div>
-                ))}
+                  );
+                })}
               </CardContent>
             </Card>
           ) : null}
@@ -632,10 +735,10 @@ export default function CallDetailPage() {
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
                   <RefreshCw className="h-4 w-4 text-blue-600" />
-                  Provider Webhook & Analytics Events
+                  Call Event Deliveries
                 </CardTitle>
                 <CardDescription>
-                  Sanitized status deliveries from Sarvam webhook and Analytics API reconciliation
+                  Verified lifecycle status notifications and background sync updates
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-2.5">
@@ -646,9 +749,14 @@ export default function CallDetailPage() {
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="neutral">{wEvt.source}</Badge>
+                        <Badge variant="neutral">
+                          {getWebhookEventSourceDisplay(wEvt.source)}
+                        </Badge>
                         <Badge variant={getCallLifecycleBadgeVariant(wEvt.mappedStatus)}>
-                          raw: {wEvt.rawStatus} → {wEvt.mappedStatus || '—'}
+                          {getRawServiceStatusDisplay(wEvt.rawStatus)} →{' '}
+                          {wEvt.mappedStatus
+                            ? getCallLifecycleDisplay(wEvt.mappedStatus).label
+                            : 'Status unavailable'}
                         </Badge>
                       </div>
                       <span className="text-slate-500">
@@ -663,28 +771,30 @@ export default function CallDetailPage() {
         </div>
       ) : null}
 
-      {/* AI Summary & Audio Recording Player */}
+      {/* AI Summary & Authorized Audio Recording */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <CheckCircle2 className="h-4 w-4 text-blue-600" />
-              AI Call Summary
+              CareVoice Call Summary
             </CardTitle>
-            <CardDescription>Automated factual summary & safety flags</CardDescription>
+            <CardDescription>Factual conversation summary &amp; safety indicators</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="rounded-xl border border-sky-100 bg-sky-50/50 p-4 text-sm text-slate-700 leading-relaxed">
-              {conversation?.aiSummary || callLog.aiSummary || 'No summary generated.'}
+              {sanitizeVoiceText(
+                conversation?.aiSummary || callLog.aiSummary || 'No summary generated yet.'
+              )}
             </p>
             {transcriptAllowed &&
             conversation?.finalAgentVariables &&
             Object.keys(conversation.finalAgentVariables).length > 0 ? (
               <div className="rounded-xl border border-sky-100 bg-white p-3 text-xs text-slate-700 space-y-1">
-                <p className="font-bold text-blue-700">Final Agent Variables</p>
-                <div className="grid grid-cols-2 gap-1.5">
+                <p className="font-bold text-blue-700">Captured Call Context</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                   {Object.entries(conversation.finalAgentVariables).map(([k, v]) => (
-                    <div key={k} className="truncate">
+                    <div key={k} className="min-w-0 break-words">
                       <span className="font-semibold">{k}:</span> {String(v)}
                     </div>
                   ))}
@@ -695,7 +805,7 @@ export default function CallDetailPage() {
               <div className="flex flex-wrap gap-2">
                 {conversation.safetyFlags.map((flag) => (
                   <Badge key={flag} variant="default">
-                    {flag}
+                    {formatSafetyFlagLabel(flag)}
                   </Badge>
                 ))}
               </div>
@@ -704,23 +814,41 @@ export default function CallDetailPage() {
         </Card>
 
         <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Volume2 className="h-4 w-4 text-blue-600" />
-              Authorized Audio Recording
-            </CardTitle>
-            <CardDescription>
-              Protected by family JWT isolation & patient CALL_RECORDING consent
-            </CardDescription>
+          <CardHeader className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+            <div className="min-w-0">
+              <CardTitle className="flex items-center gap-2">
+                <Volume2 className="h-4 w-4 text-blue-600 shrink-0" />
+                Authorized Audio Recording
+              </CardTitle>
+              <CardDescription>
+                Protected by family access control &amp; independent CALL_RECORDING consent
+              </CardDescription>
+            </div>
+            <Badge variant={recStatusDisplay.badgeVariant} className="self-start">
+              {recStatusDisplay.label}
+            </Badge>
           </CardHeader>
           <CardContent>
             {audioUrl && audioConsentGranted ? (
-              <div className="rounded-2xl border border-sky-200 bg-sky-50/60 p-4 space-y-2">
-                <div className="flex items-center justify-between text-xs text-slate-600">
+              <div className="rounded-2xl border border-sky-200 bg-sky-50/60 p-3.5 sm:p-4 space-y-3">
+                <div className="flex flex-col min-[420px]:flex-row min-[420px]:items-center justify-between gap-2 text-xs text-slate-600">
                   <span className="font-semibold text-blue-700">
-                    Recording verified ({recording?.durationSeconds ?? callLog.durationSeconds}s)
+                    Duration: {recording?.durationSeconds ?? callLog.durationSeconds}s
                   </span>
-                  <Badge variant="success">CALL_RECORDING Granted</Badge>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="success">CALL_RECORDING Granted</Badge>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleDownloadRecording}
+                      disabled={downloadingAudio}
+                      className="w-full min-[420px]:w-auto"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      {downloadingAudio ? 'Downloading...' : 'Download'}
+                    </Button>
+                  </div>
                 </div>
                 <audio controls src={audioUrl} className="w-full" />
               </div>
@@ -731,17 +859,17 @@ export default function CallDetailPage() {
                   callLog.recordingStatus === 'CONSENT_DENIED'
                     ? 'Audio recording withheld (CALL_RECORDING consent not granted)'
                     : callLog.recordingStatus === 'PROCESSING'
-                      ? 'Audio recording pending on Sarvam Analytics'
+                      ? 'Audio recording is still processing'
                       : 'Audio recording unavailable'
                 }
                 description={
                   callLog.recordingStatus === 'CONSENT_DENIED'
                     ? 'CALL_RECORDING consent is not GRANTED or was revoked. Audio is blocked/deleted while authorized transcripts remain unaffected.'
                     : recordingFetchNote ||
-                      callLog.recordingNote ||
+                      (callLog.recordingNote ? sanitizeVoiceText(callLog.recordingNote) : '') ||
                       (callLog.recordingStatus === 'PROCESSING'
-                        ? 'Sarvam Analytics can take up to ~60 seconds to archive call audio. Click Sync with Sarvam to check again.'
-                        : 'No audio recording is available from Sarvam Analytics for this call.')
+                        ? 'Call audio archiving typically completes shortly after the call ends. Click Sync Call Status to check again.'
+                        : 'No audio recording is available for this call.')
                 }
               />
             )}
@@ -751,33 +879,17 @@ export default function CallDetailPage() {
 
       {/* Conversation Transcript */}
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between gap-2">
-          <div>
+        <CardHeader className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="min-w-0">
             <CardTitle>Conversation Transcript</CardTitle>
             <CardDescription>
-              Turn-by-turn dialogue in {getLanguageLabel(actualLang || requestedLang)} with
-              caregiver notes
+              Speaker-identified dialogue in {getLanguageLabel(actualLang || requestedLang)} with
+              timestamps and caregiver notes
             </CardDescription>
           </div>
-          <div className="flex items-center gap-2">
-            {(callLog.transcriptSource || conversation?.transcriptSource) ? (
-              <Badge variant="neutral">
-                Source: {callLog.transcriptSource || conversation?.transcriptSource}
-              </Badge>
-            ) : null}
-            {callLog.transcriptStatus ? (
-              <Badge
-                variant={
-                  callLog.transcriptStatus === 'AVAILABLE'
-                    ? 'success'
-                    : callLog.transcriptStatus === 'CONSENT_DENIED'
-                      ? 'warning'
-                      : 'neutral'
-                }
-              >
-                {callLog.transcriptStatus}
-              </Badge>
-            ) : null}
+          <div className="flex flex-wrap items-center gap-2">
+            {txSourceDisplay ? <Badge variant="neutral">Source: {txSourceDisplay}</Badge> : null}
+            <Badge variant={txStatusDisplay.badgeVariant}>{txStatusDisplay.label}</Badge>
           </div>
         </CardHeader>
         <CardContent>
@@ -792,13 +904,13 @@ export default function CallDetailPage() {
               icon={Bot}
               title={
                 callLog.transcriptStatus === 'PENDING'
-                  ? 'Waiting for Sarvam transcript sync'
+                  ? 'Conversation transcript is processing'
                   : 'No conversation turns recorded'
               }
               description={
                 callLog.transcriptStatus === 'PENDING'
-                  ? 'Live Sarvam Analytics transcripts typically appear within ~60 seconds of call completion. Click Sync with Sarvam to fetch now.'
-                  : 'Unanswered, busy, rejected, not-connected, or still-dialing calls do not have spoken dialogue, or the provider returned no dialogue turns.'
+                  ? 'Call transcripts typically appear shortly after call completion. Click Sync Call Status to refresh.'
+                  : 'Unanswered, busy, declined, not-connected, or still-dialing calls do not have spoken dialogue, or no transcript turns were returned.'
               }
             />
           ) : (
@@ -825,18 +937,22 @@ export default function CallDetailPage() {
                       <User className="h-4 w-4" />
                     )}
                   </div>
-                  <div className="flex-1 space-y-1">
+                  <div className="flex-1 min-w-0 space-y-1">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="text-xs font-bold text-slate-800">
-                          {turn.speaker === 'AI' ? 'CareVoice AI Assistant' : 'Patient'}
+                          {turn.speaker === 'AI'
+                            ? 'CareVoice AI Assistant'
+                            : `${patientName} (Patient)`}
                         </span>
                         {turn.language ? (
                           <Badge variant="neutral">{getLanguageLabel(turn.language)}</Badge>
                         ) : null}
                       </div>
-                      <div className="flex items-center gap-2">
-                        {turn.intent ? <Badge variant="neutral">{turn.intent}</Badge> : null}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {turn.intent ? (
+                          <Badge variant="neutral">{turn.intent.replace(/_/g, ' ')}</Badge>
+                        ) : null}
                         {turn.timestamp ? (
                           <span className="text-[11px] text-slate-400">
                             {formatDateTimeInTz(turn.timestamp, callLog.familyMemberId?.timezone)}
@@ -844,10 +960,10 @@ export default function CallDetailPage() {
                         ) : null}
                       </div>
                     </div>
-                    <p className="text-sm text-slate-900">{turn.text}</p>
+                    <p className="text-sm text-slate-900 break-words">{turn.text}</p>
                     {turn.translatedText ? (
-                      <p className="text-xs text-slate-500">
-                        Caregiver note / translation: {turn.translatedText}
+                      <p className="text-xs text-slate-500 break-words">
+                        Caregiver note: {sanitizeVoiceText(turn.translatedText)}
                       </p>
                     ) : null}
                   </div>
@@ -879,9 +995,10 @@ export default function CallDetailPage() {
                       <span>+{cb.requestedDelayMinutes} minutes</span>
                       <Badge variant="indigo">{cb.status}</Badge>
                     </div>
-                    <p className="mt-1 text-slate-600">{cb.reason}</p>
+                    <p className="mt-1 text-slate-600">{sanitizeVoiceText(cb.reason)}</p>
                     <p className="mt-1 text-slate-500">
-                      Scheduled: {formatDateTimeInTz(cb.scheduledFor, callLog.familyMemberId?.timezone)}
+                      Scheduled:{' '}
+                      {formatDateTimeInTz(cb.scheduledFor, callLog.familyMemberId?.timezone)}
                     </p>
                   </div>
                 ))}
@@ -907,7 +1024,7 @@ export default function CallDetailPage() {
                       <span>{esc.reason.replace(/_/g, ' ')}</span>
                       <Badge variant="danger">{esc.severity}</Badge>
                     </div>
-                    <p className="mt-1 text-rose-700">{esc.description}</p>
+                    <p className="mt-1 text-rose-700">{sanitizeVoiceText(esc.description)}</p>
                   </div>
                 ))}
               </CardContent>

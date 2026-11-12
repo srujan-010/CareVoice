@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { LANGUAGE_CODES } from '../constants/languages';
+import { LANGUAGE_CODES, tryGetSupportedLanguage } from '../constants/languages';
 import { CONSENT_STATUSES, CONSENT_TYPES, normalizeConsentTypeInput } from '../constants/statuses';
 import * as familyMemberController from '../controllers/familyMember.controller';
 import { authenticate, authorizeRoles } from '../middleware/auth.middleware';
@@ -10,32 +10,60 @@ import { isValidE164PhoneNumber } from '../utils/phone';
 const router = Router();
 router.use(authenticate);
 
+const E164_MESSAGE =
+  "Phone number must be in E.164 format starting with '+' and country code (e.g., +919876543210)";
+
 const e164PhoneSchema = z
   .string()
-  .min(8)
-  .max(20)
-  .refine(
-    (val) => {
-      const trimmed = val.trim();
-      if (!trimmed.startsWith('+')) return false;
-      const compact = `+${trimmed.slice(1).replace(/[\s()-]/g, '')}`;
-      return isValidE164PhoneNumber(compact);
-    },
-    {
-      message:
-        "Phone number must be in E.164 format starting with '+' and country code (e.g., +919876543210)",
+  .trim()
+  .min(8, E164_MESSAGE)
+  .max(32, E164_MESSAGE)
+  .transform((val, ctx) => {
+    if (!val.startsWith('+')) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: E164_MESSAGE,
+      });
+      return z.NEVER;
     }
-  );
+    const compact = `+${val.slice(1).replace(/[\s().-]/g, '')}`;
+    if (!isValidE164PhoneNumber(compact)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: E164_MESSAGE,
+      });
+      return z.NEVER;
+    }
+    return compact;
+  });
+
+const preferredLanguageSchema = z
+  .string()
+  .trim()
+  .transform((val, ctx) => {
+    const matched = tryGetSupportedLanguage(val);
+    if (matched) {
+      return matched.code;
+    }
+    if (LANGUAGE_CODES.includes(val)) {
+      return val;
+    }
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Unsupported preferredLanguage "${val}". Supported codes: ${LANGUAGE_CODES.join(', ')}`,
+    });
+    return z.NEVER;
+  });
 
 const emergencyContactSchema = z.object({
-  name: z.string().min(2).max(120),
+  name: z.string().trim().min(2).max(120),
   phoneNumber: e164PhoneSchema,
-  relationship: z.string().min(2).max(60),
+  relationship: z.string().trim().min(2).max(60),
 });
 
 const callingPreferencesSchema = z.object({
-  quietHoursStart: z.string().regex(/^\d{2}:\d{2}$/).optional(),
-  quietHoursEnd: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+  quietHoursStart: z.string().trim().regex(/^\d{2}:\d{2}$/).optional(),
+  quietHoursEnd: z.string().trim().regex(/^\d{2}:\d{2}$/).optional(),
   maxRetries: z.number().int().min(0).max(5).optional(),
   retryIntervalMinutes: z.number().int().min(5).max(60).optional(),
   allowMealReminders: z.boolean().optional(),
@@ -45,19 +73,19 @@ const callingPreferencesSchema = z.object({
 });
 
 const createMemberSchema = z.object({
-  fullName: z.string().min(2).max(120),
+  fullName: z.string().trim().min(2).max(120),
   phoneNumber: e164PhoneSchema,
   age: z.number().int().min(0).max(130).optional(),
-  preferredLanguage: z.enum(LANGUAGE_CODES as [string, ...string[]]).default('en'),
-  timezone: z.string().default('Asia/Kolkata'),
-  relationship: z.string().min(2).max(60),
+  preferredLanguage: preferredLanguageSchema.default('en'),
+  timezone: z.string().trim().min(1).default('Asia/Kolkata'),
+  relationship: z.string().trim().min(2).max(60),
   emergencyContact: emergencyContactSchema,
   callingPreferences: callingPreferencesSchema.optional(),
   recordingConsentStatus: z.enum(CONSENT_STATUSES).optional(),
   transcriptConsentStatus: z.enum(CONSENT_STATUSES).optional(),
   voiceCallingConsentStatus: z.enum(CONSENT_STATUSES).optional(),
   isActive: z.boolean().optional(),
-  notes: z.string().max(1000).optional(),
+  notes: z.string().trim().max(1000).optional(),
 });
 
 const updateMemberSchema = createMemberSchema.partial();

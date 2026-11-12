@@ -78,10 +78,10 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#EFF6FF] via-[#F8FBFF] to-[#E0F2FE] px-4 py-8 sm:px-6 lg:px-8 flex items-center justify-center">
-      <div className="mx-auto grid w-full max-w-5xl grid-cols-1 gap-8 lg:grid-cols-12 items-center">
+    <div className="min-h-screen overflow-x-clip bg-gradient-to-br from-[#EFF6FF] via-[#F8FBFF] to-[#E0F2FE] px-3.5 py-6 sm:px-6 sm:py-8 lg:px-8 flex items-center justify-center">
+      <div className="mx-auto grid w-full max-w-5xl grid-cols-1 gap-6 sm:gap-8 lg:grid-cols-12 items-center">
         {/* Left healthcare SaaS value panel */}
-        <div className="lg:col-span-6 space-y-6 animate-fade-up">
+        <div className="lg:col-span-6 space-y-5 sm:space-y-6 animate-fade-up min-w-0">
           <div className="inline-flex items-center gap-2.5 rounded-full border border-sky-200 bg-white px-4 py-1.5 shadow-sm">
             <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-white">
               <HeartHandshake className="h-3.5 w-3.5" />
@@ -91,37 +91,37 @@ export default function LoginPage() {
             </span>
           </div>
 
-          <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-slate-900 leading-tight">
+          <h1 className="text-2xl min-[400px]:text-3xl sm:text-4xl font-extrabold tracking-tight text-slate-900 leading-tight">
             Caring voice calls that keep parents on track with every medicine.
           </h1>
-          <p className="text-base text-slate-600 leading-relaxed">
+          <p className="text-sm sm:text-base text-slate-600 leading-relaxed">
             Automated multilingual telephone reminders with meal-aware scheduling, smart callbacks,
             and transparent family adherence tracking — built for safety and peace of mind.
           </p>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
             <div className="rounded-2xl border border-sky-100 bg-white/90 p-4 shadow-card">
               <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-50 text-blue-600 mb-2.5">
                 <Globe2 className="h-5 w-5" />
               </div>
               <p className="text-sm font-bold text-slate-900">11+ Indian Languages</p>
               <p className="text-xs text-slate-500 mt-1">
-                Telugu, Hindi, Marathi, Tamil, Kannada, Bengali & English per parent.
+                Telugu, Hindi, Marathi, Tamil, Kannada, Bengali &amp; English per parent.
               </p>
             </div>
             <div className="rounded-2xl border border-sky-100 bg-white/90 p-4 shadow-card">
               <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600 mb-2.5">
                 <CheckCircle2 className="h-5 w-5" />
               </div>
-              <p className="text-sm font-bold text-slate-900">Meal & Dose Accuracy</p>
+              <p className="text-sm font-bold text-slate-900">Meal &amp; Dose Accuracy</p>
               <p className="text-xs text-slate-500 mt-1">
                 Separate before/after meal checks, smart callbacks, and confirmed dose logs.
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5 rounded-xl border border-sky-200/80 bg-white/80 px-4 py-3 text-xs text-slate-600">
-            <ShieldCheck className="h-4 w-4 shrink-0 text-blue-600" />
+          <div className="flex items-start sm:items-center gap-2.5 rounded-xl border border-sky-200/80 bg-white/80 px-4 py-3 text-xs text-slate-600">
+            <ShieldCheck className="h-4 w-4 shrink-0 text-blue-600 mt-0.5 sm:mt-0" />
             <span>
               Safety-first assistant: strictly reminds and confirms — never alters prescriptions or
               dosages.
@@ -130,9 +130,9 @@ export default function LoginPage() {
         </div>
 
         {/* Right login / register card */}
-        <div className="lg:col-span-6">
+        <div className="lg:col-span-6 min-w-0">
           <Card className="border-sky-200/90 bg-white shadow-xl shadow-blue-900/5">
-            <CardContent className="p-6 sm:p-8">
+            <CardContent className="p-4 min-[400px]:p-6 sm:p-8">
               <Tabs
                 value={tab}
                 onValueChange={(v) => {
@@ -140,7 +140,7 @@ export default function LoginPage() {
                   setError(null);
                 }}
               >
-                <TabsList className="grid w-full grid-cols-2 mb-6">
+                <TabsList className="grid w-full grid-cols-1 min-[380px]:grid-cols-2 mb-5 sm:mb-6">
                   <TabsTrigger value="login">Admin Sign In</TabsTrigger>
                   <TabsTrigger value="register">Create Family Account</TabsTrigger>
                 </TabsList>
@@ -270,6 +270,7 @@ export default function LoginPage() {
                         <div className="relative">
                           <Phone className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
                           <Input
+                            type="tel"
                             placeholder="+919876543210"
                             value={phone}
                             onChange={(e) => setPhone(e.target.value)}

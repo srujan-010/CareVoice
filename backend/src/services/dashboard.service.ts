@@ -56,6 +56,8 @@ export async function getDashboardOverview(familyId: string) {
     CallLogModel
       ? CallLogModel.countDocuments({
           familyId: familyObjectId,
+          mode: 'live',
+          isMock: false,
           createdAt: { $gte: todayStart, $lte: todayEnd },
           outcome: { $in: ['COMPLETED', 'ANSWERED'] },
         })
@@ -122,6 +124,8 @@ export async function getDashboardOverview(familyId: string) {
     CallLogModel
       ? CallLogModel.find({
           familyId: familyObjectId,
+          mode: 'live',
+          isMock: false,
           createdAt: { $gte: sevenDaysAgo, $lte: todayEnd },
         }).lean()
       : Promise.resolve([]),

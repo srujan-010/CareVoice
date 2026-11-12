@@ -95,21 +95,26 @@ export default function NotificationsPage() {
   return (
     <div className="space-y-6 animate-fade-up">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
-            Alerts, Escalations & Notifications
+        <div className="min-w-0">
+          <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900">
+            Alerts, Escalations &amp; Notifications
           </h1>
           <p className="text-sm text-slate-500">
             Caregiver escalations and multi-channel notifications (In-App, WhatsApp, SMS adapters).
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
-          <Button variant="outline" onClick={loadAll}>
+        <div className="flex flex-col min-[420px]:flex-row min-[420px]:flex-wrap items-stretch min-[420px]:items-center gap-2.5">
+          <Button variant="outline" onClick={loadAll} className="w-full min-[420px]:w-auto">
             <RefreshCw className="h-4 w-4" />
+            <span className="min-[420px]:hidden">Refresh</span>
           </Button>
           {canEdit && notifications.some((n) => !n.isRead) ? (
-            <Button variant="secondary" onClick={handleMarkAllRead}>
+            <Button
+              variant="secondary"
+              onClick={handleMarkAllRead}
+              className="w-full min-[420px]:w-auto"
+            >
               <CheckCheck className="h-4 w-4" />
               Mark All Read
             </Button>
@@ -163,9 +168,9 @@ export default function NotificationsPage() {
                       key={esc._id}
                       className="rounded-xl border border-sky-100 bg-sky-50/35 p-4 space-y-2.5"
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <p className="text-sm font-bold text-slate-900">
+                      <div className="flex flex-col min-[420px]:flex-row min-[420px]:items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-bold text-slate-900 break-words">
                             {esc.familyMemberId?.fullName || 'Patient'} —{' '}
                             {esc.reason.replace(/_/g, ' ')}
                           </p>
@@ -173,7 +178,7 @@ export default function NotificationsPage() {
                             {formatDateTimeInTz(esc.createdAt)}
                           </p>
                         </div>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                           <Badge
                             variant={
                               esc.severity === 'CRITICAL' || esc.severity === 'HIGH'
@@ -188,7 +193,7 @@ export default function NotificationsPage() {
                           </Badge>
                         </div>
                       </div>
-                      <p className="text-xs text-slate-700">{esc.description}</p>
+                      <p className="text-xs text-slate-700 break-words">{esc.description}</p>
                       {canEdit && esc.status !== 'RESOLVED' ? (
                         <div className="flex justify-end gap-2">
                           {esc.status === 'OPEN' ? (
@@ -246,10 +251,10 @@ export default function NotificationsPage() {
                           : 'border-blue-200 bg-sky-50/70'
                       }`}
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <p className="text-sm font-bold text-slate-900">{n.title}</p>
-                          <p className="text-xs text-slate-500">
+                      <div className="flex flex-col min-[420px]:flex-row min-[420px]:items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-bold text-slate-900 break-words">{n.title}</p>
+                          <p className="text-xs text-slate-500 break-words">
                             {n.channel} • To: {n.recipientName} ({n.recipientContact})
                           </p>
                         </div>
@@ -261,11 +266,12 @@ export default function NotificationsPage() {
                                 ? 'danger'
                                 : 'neutral'
                           }
+                          className="self-start shrink-0"
                         >
                           {n.status}
                         </Badge>
                       </div>
-                      <p className="text-xs text-slate-700">{n.message}</p>
+                      <p className="text-xs text-slate-700 break-words">{n.message}</p>
                       <div className="flex items-center justify-between text-[11px] text-slate-400">
                         <span>{formatDateTimeInTz(n.createdAt)}</span>
                         {canEdit && !n.isRead ? (

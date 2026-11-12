@@ -1772,5 +1772,141 @@ describe('Real Outbound Voice Calling Lifecycle, Consent, Preflight & Safety Int
     expect(dialRes.status).toBe(201);
     expect(dialRes.body.data.providerResponse.attemptId).toBe('attempt_instant_outbound_001');
   }, 60000);
+
+  it('enforces today live call stats exclusion of mock calls, filters by ADMIN_TEST_CALL & date range, sets attachment on ?download=true, and records PROVIDER_UNAVAILABLE on 503', async () => {
+    const todayLocal = new Date().toISOString().slice(0, 10);
+    const seedDose = await DoseInstance.findById(doseGrantedId).lean();
+    expect(seedDose?.familyId).toBeTruthy();
+
+    // 1. Seed a mock call for today — must NOT appear in today live call KPIs
+    await CallLog.create({
+      familyId: seedDose!.familyId,
+      familyMemberId: memberAllGrantedId,
+      medicineId: seedDose!.medicineId,
+      doseInstanceId: doseGrantedId,
+      callType: 'MEDICINE_REMINDER',
+      phoneNumber: '+919876543210',
+      language: 'te',
+      scheduledAt: new Date(),
+      startedAt: new Date(),
+      endedAt: new Date(),
+      durationSeconds: 45,
+      callStatus: 'COMPLETED',
+      outcome: 'COMPLETED',
+      mode: 'mock',
+      isMock: true,
+      isTestCall: false,
+      provider: 'mock',
+    });
+
+    const statsBeforeRes = await request(app)
+      .get('/api/calls/stats/today')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(statsBeforeRes.status).toBe(200);
+    const statsBefore = statsBeforeRes.body.data;
+    expect(statsBefore.mockCallsToday).toBeGreaterThanOrEqual(1);
+
+    // 2. Verify ADMIN_TEST_CALL filter & dateFrom/dateTo filter
+    const adminTestFilterRes = await request(app)
+      .get(`/api/calls?callType=ADMIN_TEST_CALL&dateFrom=${todayLocal}&dateTo=${todayLocal}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(adminTestFilterRes.status).toBe(200);
+    expect(Array.isArray(adminTestFilterRes.body.data)).toBe(true);
+    expect(adminTestFilterRes.body.data.length).toBeGreaterThanOrEqual(1);
+    expect(adminTestFilterRes.body.data.every((c: { isTestCall?: boolean }) => c.isTestCall)).toBe(
+      true
+    );
+
+    // Count live completed vs total before placing a 503-failing live test call
+    const completedCallForDownload = adminTestFilterRes.body.data.find(
+      (c: { recordingStatus?: string; callStatus?: string }) =>
+        c.recordingStatus === 'AVAILABLE' && c.callStatus === 'COMPLETED'
+    );
+    expect(completedCallForDownload?._id).toBeTruthy();
+
+    // 3. Verify recording ?download=true adds Content-Disposition: attachment
+    const dlFetchSpy = vi.fn().mockResolvedValueOnce(
+      new Response(Uint8Array.from([82, 73, 70, 70, 1, 2, 3, 4]), {
+        status: 200,
+        headers: { 'content-type': 'audio/wav' },
+      })
+    );
+    vi.stubGlobal('fetch', dlFetchSpy);
+
+    const downloadRes = await request(app)
+      .get(`/api/calls/${String(completedCallForDownload._id)}/recording?download=true`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(downloadRes.status).toBe(200);
+    expect(downloadRes.headers['content-disposition']).toContain('attachment');
+    expect(downloadRes.headers['content-disposition']).toContain('carevoice-call-');
+
+    // 4. Simulate 503 Service Unavailable from upstream -> persists callStatus = PROVIDER_UNAVAILABLE
+    const outageMed = await request(app)
+      .post('/api/medicines')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        familyMemberId: memberAllGrantedId,
+        name: 'Metformin',
+        dosage: '500mg',
+        prescribedInstructions: 'After dinner',
+        foodInstruction: 'AFTER_FOOD',
+        associatedMeal: 'DINNER',
+        startDate: new Date().toISOString(),
+        frequency: 'ONCE_DAILY',
+        scheduledTimes: [
+          {
+            slotLabel: 'Dinner Slot',
+            timeOfDay: '20:30',
+            associatedMeal: 'DINNER',
+            foodInstruction: 'AFTER_FOOD',
+            mealReminderOffsetMinutes: -15,
+            medicineReminderOffsetMinutes: 0,
+            confirmationOffsetMinutes: 20,
+          },
+        ],
+      });
+    expect(outageMed.status).toBe(201);
+    const outageDoseId = String(
+      (await DoseInstance.findOne({ medicineId: outageMed.body.data.id }).lean())?._id
+    );
+
+    const outageFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method || 'GET';
+      if (url.includes('/outbounds') && method === 'POST') {
+        return new Response(JSON.stringify({ detail: 'Upstream gateway temporarily unavailable' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', outageFetch);
+
+    const outageRes = await request(app)
+      .post('/api/voice-calls/real-test')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        familyMemberId: memberAllGrantedId,
+        doseInstanceId: outageDoseId,
+        callType: 'MEDICINE_REMINDER',
+        confirmedByAdmin: true,
+        overrideQuietHours: true,
+      });
+    expect(outageRes.status).toBe(502);
+    const outageLogId = outageRes.body.details.callLogId as string;
+    const outageLog = await CallLog.findById(outageLogId).lean();
+    expect(outageLog?.callStatus).toBe('PROVIDER_UNAVAILABLE');
+    expect(outageLog?.aiSummary).not.toMatch(/sarvam|vobiz/i);
+
+    const statsAfterRes = await request(app)
+      .get('/api/calls/stats/today')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(statsAfterRes.status).toBe(200);
+    // Live totalCalls & failedCalls incremented by 1 from the 503 live call, while mock calls never affect failedCalls/successfullyConnected
+    expect(statsAfterRes.body.data.totalCalls).toBe(statsBefore.totalCalls + 1);
+    expect(statsAfterRes.body.data.failedCalls).toBe(statsBefore.failedCalls + 1);
+    expect(statsAfterRes.body.data.successfullyConnected).toBe(statsBefore.successfullyConnected);
+  }, 60000);
 });
 

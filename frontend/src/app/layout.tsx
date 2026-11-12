@@ -13,6 +13,13 @@ export const metadata: Metadata = {
   title: 'CareVoice — AI Family Medicine Reminder & Voice Care Platform',
   description:
     'Multilingual AI voice medicine reminders, meal-aware dosing schedules, smart callbacks, and family adherence monitoring.',
+  icons: {
+    icon: [
+      { url: '/icon.svg', type: 'image/svg+xml' },
+      { url: '/favicon.ico', sizes: 'any' },
+    ],
+    shortcut: ['/favicon.ico'],
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

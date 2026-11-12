@@ -35,6 +35,8 @@ export async function generateAdherenceReport(
   };
   const callQuery: Record<string, unknown> = {
     familyId: familyObjectId,
+    mode: 'live',
+    isMock: false,
     createdAt: { $gte: startUtc },
   };
   const callbackQuery: Record<string, unknown> = {

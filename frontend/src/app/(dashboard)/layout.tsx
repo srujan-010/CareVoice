@@ -22,11 +22,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <ProtectedRoute>
-      <div className="min-h-screen bg-[#F8FBFF]">
+      <div className="min-h-screen bg-[#F8FBFF] overflow-x-clip">
         <Sidebar mobileOpen={mobileOpen} onCloseMobile={() => setMobileOpen(false)} />
-        <div className="lg:pl-64 flex min-h-screen flex-col">
+        <div className="lg:pl-64 flex min-h-screen min-w-0 flex-col">
           <Header onOpenMobileMenu={() => setMobileOpen(true)} voiceMode={voiceMode} />
-          <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+          <main className="flex-1 min-w-0 p-3.5 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
             {children}
           </main>
         </div>

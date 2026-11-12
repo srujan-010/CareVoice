@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input, SelectNative } from '@/components/ui/input';
 import { ApiClientError, apiRequest } from '@/lib/api';
+import { translateVoiceError } from '@/lib/voiceDisplay';
 
 interface DoseOption {
   id: string;
@@ -74,7 +75,10 @@ export function MockCallSimulatorDialog({
       onOpenChange(false);
     } catch (err) {
       setError(
-        err instanceof ApiClientError ? err.message : 'Unable to simulate mock voice call.'
+        translateVoiceError(
+          err instanceof ApiClientError ? err.message : undefined,
+          'Unable to run test environment call.'
+        )
       );
     } finally {
       setSubmitting(false);
@@ -87,11 +91,11 @@ export function MockCallSimulatorDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-blue-600" />
-            Mock Voice Call Simulator (Dev Sandbox)
+            Test Call Simulator (Test Environment)
           </DialogTitle>
           <DialogDescription>
-            Explicitly simulate a multilingual AI call in mock mode to test transcripts,
-            recordings, smart callbacks, and safety escalations.
+            Simulate a multilingual CareVoice reminder call offline to verify transcripts, audio
+            playback, smart callbacks, and safety escalations.
           </DialogDescription>
         </DialogHeader>
 
@@ -173,19 +177,24 @@ export function MockCallSimulatorDialog({
             ) : null}
 
             <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-900">
-              <strong>MOCK VOICE SANDBOX ONLY:</strong> This does{' '}
-              <strong>NOT</strong> dial any real phone number or contact Sarvam telephony. All
-              generated call logs, transcripts, and audio are permanently tagged{' '}
-              <strong>MOCK (isMock: true)</strong> for offline development/testing.
+              <strong>TEST ENVIRONMENT ONLY:</strong> This does{' '}
+              <strong>NOT</strong> dial any real phone number or trigger live voice calling. All
+              generated call logs, transcripts, and sample audio are tagged{' '}
+              <strong>TEST</strong> and strictly excluded from live patient call statistics.
             </div>
 
-            <div className="flex justify-end gap-3">
-              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2.5 sm:gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+                className="w-full sm:w-auto"
+              >
                 Cancel
               </Button>
-              <Button type="submit" disabled={submitting}>
+              <Button type="submit" disabled={submitting} className="w-full sm:w-auto">
                 <PhoneCall className="h-4 w-4" />
-                {submitting ? 'Running Simulation...' : 'Run Mock Call'}
+                {submitting ? 'Running Test Call...' : 'Run Test Call'}
               </Button>
             </div>
           </form>

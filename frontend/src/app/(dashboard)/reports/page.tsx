@@ -106,23 +106,24 @@ export default function ReportsPage() {
   return (
     <div className="space-y-6 animate-fade-up">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
-            Adherence & Voice Analytics Reports
+        <div className="min-w-0">
+          <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900">
+            Adherence &amp; Call Analytics Reports
           </h1>
           <p className="text-sm text-slate-500">
-            Strict separation of taken, not taken, unconfirmed, pending, callback-requested &
-            escalated doses.
+            Strict separation of taken, not taken, unconfirmed, pending, callback-requested &amp;
+            escalated doses. Call metrics reflect live patient calls only.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
           {(['daily', 'weekly', 'monthly'] as const).map((p) => (
             <Button
               key={p}
               size="sm"
               variant={period === p ? 'default' : 'outline'}
               onClick={() => setPeriod(p)}
+              className="flex-1 sm:flex-initial"
             >
               {p.charAt(0).toUpperCase() + p.slice(1)}
             </Button>
@@ -130,7 +131,7 @@ export default function ReportsPage() {
           <SelectNative
             value={memberFilter}
             onChange={(e) => setMemberFilter(e.target.value)}
-            className="w-48"
+            className="w-full sm:w-48"
           >
             <option value="">All Members</option>
             {members.map((m) => (
@@ -217,7 +218,7 @@ export default function ReportsPage() {
                 Unconfirmed doses are never merged into Taken statistics
               </CardDescription>
             </CardHeader>
-            <CardContent className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            <CardContent className="grid grid-cols-1 min-[380px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
               {Object.entries(report.summary.statusBreakdown).map(([status, count]) => {
                 const meta = DOSE_STATUS_META[status];
                 return (
@@ -267,34 +268,58 @@ export default function ReportsPage() {
                     description="Create medicines and generate dose schedules to see per-medicine adherence."
                   />
                 ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs">
-                      <thead>
-                        <tr className="border-b border-sky-100 text-slate-500">
-                          <th className="py-2">Medicine</th>
-                          <th className="py-2">Taken</th>
-                          <th className="py-2">Not Taken</th>
-                          <th className="py-2">Unconfirmed</th>
-                          <th className="py-2">Total</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-sky-100">
-                        {report.medicineBreakdown.map((m) => (
-                          <tr key={m.medicineId}>
-                            <td className="py-2.5 font-bold text-slate-900">
-                              {m.name} ({m.dosage})
-                            </td>
-                            <td className="py-2.5 text-emerald-700 font-semibold">{m.taken}</td>
-                            <td className="py-2.5 text-rose-700 font-semibold">{m.notTaken}</td>
-                            <td className="py-2.5 text-amber-700 font-semibold">
-                              {m.unconfirmed + m.escalated}
-                            </td>
-                            <td className="py-2.5 text-slate-700">{m.total}</td>
+                  <>
+                    <div className="space-y-2.5 sm:hidden">
+                      {report.medicineBreakdown.map((m) => (
+                        <div
+                          key={m.medicineId}
+                          className="rounded-xl border border-sky-100 bg-sky-50/40 p-3 text-xs space-y-2"
+                        >
+                          <p className="font-bold text-slate-900 break-words">
+                            {m.name} ({m.dosage})
+                          </p>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <span className="text-emerald-700 font-semibold">Taken: {m.taken}</span>
+                            <span className="text-rose-700 font-semibold">
+                              Not Taken: {m.notTaken}
+                            </span>
+                            <span className="text-amber-700 font-semibold">
+                              Unconfirmed: {m.unconfirmed + m.escalated}
+                            </span>
+                            <span className="text-slate-700 font-semibold">Total: {m.total}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="hidden sm:block overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead>
+                          <tr className="border-b border-sky-100 text-slate-500">
+                            <th className="py-2 pr-3">Medicine</th>
+                            <th className="py-2 px-2">Taken</th>
+                            <th className="py-2 px-2">Not Taken</th>
+                            <th className="py-2 px-2">Unconfirmed</th>
+                            <th className="py-2 pl-2 text-right">Total</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                        </thead>
+                        <tbody className="divide-y divide-sky-100">
+                          {report.medicineBreakdown.map((m) => (
+                            <tr key={m.medicineId}>
+                              <td className="py-2.5 pr-3 font-bold text-slate-900">
+                                {m.name} ({m.dosage})
+                              </td>
+                              <td className="py-2.5 px-2 text-emerald-700 font-semibold">{m.taken}</td>
+                              <td className="py-2.5 px-2 text-rose-700 font-semibold">{m.notTaken}</td>
+                              <td className="py-2.5 px-2 text-amber-700 font-semibold">
+                                {m.unconfirmed + m.escalated}
+                              </td>
+                              <td className="py-2.5 pl-2 text-right text-slate-700">{m.total}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
                 )}
               </CardContent>
             </Card>
@@ -311,39 +336,68 @@ export default function ReportsPage() {
                     description="Add family members to track individual adherence and call response rates."
                   />
                 ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs">
-                      <thead>
-                        <tr className="border-b border-sky-100 text-slate-500">
-                          <th className="py-2">Member</th>
-                          <th className="py-2">Taken</th>
-                          <th className="py-2">Not Taken</th>
-                          <th className="py-2">Unconfirmed</th>
-                          <th className="py-2">Calls Answered</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-sky-100">
-                        {report.memberBreakdown.map((m) => (
-                          <tr key={m.familyMemberId}>
-                            <td className="py-2.5">
-                              <p className="font-bold text-slate-900">{m.fullName}</p>
-                              <p className="text-[11px] text-slate-500">
-                                {getLanguageLabel(m.preferredLanguage)}
-                              </p>
-                            </td>
-                            <td className="py-2.5 text-emerald-700 font-semibold">{m.taken}</td>
-                            <td className="py-2.5 text-rose-700 font-semibold">{m.notTaken}</td>
-                            <td className="py-2.5 text-amber-700 font-semibold">
-                              {m.unconfirmed + m.escalated}
-                            </td>
-                            <td className="py-2.5 text-slate-700">
-                              {m.callsAnsweredOrCompleted}/{m.callsTotal}
-                            </td>
+                  <>
+                    <div className="space-y-2.5 sm:hidden">
+                      {report.memberBreakdown.map((m) => (
+                        <div
+                          key={m.familyMemberId}
+                          className="rounded-xl border border-sky-100 bg-sky-50/40 p-3 text-xs space-y-2"
+                        >
+                          <div>
+                            <p className="font-bold text-slate-900 break-words">{m.fullName}</p>
+                            <p className="text-[11px] text-slate-500">
+                              {getLanguageLabel(m.preferredLanguage)}
+                            </p>
+                          </div>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <span className="text-emerald-700 font-semibold">Taken: {m.taken}</span>
+                            <span className="text-rose-700 font-semibold">
+                              Not Taken: {m.notTaken}
+                            </span>
+                            <span className="text-amber-700 font-semibold">
+                              Unconfirmed: {m.unconfirmed + m.escalated}
+                            </span>
+                            <span className="text-slate-700 font-semibold">
+                              Calls: {m.callsAnsweredOrCompleted}/{m.callsTotal}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="hidden sm:block overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead>
+                          <tr className="border-b border-sky-100 text-slate-500">
+                            <th className="py-2 pr-3">Member</th>
+                            <th className="py-2 px-2">Taken</th>
+                            <th className="py-2 px-2">Not Taken</th>
+                            <th className="py-2 px-2">Unconfirmed</th>
+                            <th className="py-2 pl-2 text-right">Calls Answered</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                        </thead>
+                        <tbody className="divide-y divide-sky-100">
+                          {report.memberBreakdown.map((m) => (
+                            <tr key={m.familyMemberId}>
+                              <td className="py-2.5 pr-3">
+                                <p className="font-bold text-slate-900">{m.fullName}</p>
+                                <p className="text-[11px] text-slate-500">
+                                  {getLanguageLabel(m.preferredLanguage)}
+                                </p>
+                              </td>
+                              <td className="py-2.5 px-2 text-emerald-700 font-semibold">{m.taken}</td>
+                              <td className="py-2.5 px-2 text-rose-700 font-semibold">{m.notTaken}</td>
+                              <td className="py-2.5 px-2 text-amber-700 font-semibold">
+                                {m.unconfirmed + m.escalated}
+                              </td>
+                              <td className="py-2.5 pl-2 text-right text-slate-700">
+                                {m.callsAnsweredOrCompleted}/{m.callsTotal}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
                 )}
               </CardContent>
             </Card>

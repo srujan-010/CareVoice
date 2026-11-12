@@ -89,8 +89,8 @@ export default function FamilyMembersPage() {
   return (
     <div className="space-y-6 animate-fade-up">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
+        <div className="min-w-0">
+          <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900">
             Family Members
           </h1>
           <p className="text-sm text-slate-500">
@@ -104,6 +104,7 @@ export default function FamilyMembersPage() {
               setEditingMember(null);
               setDialogOpen(true);
             }}
+            className="w-full sm:w-auto"
           >
             <Plus className="h-4 w-4" />
             Add Family Member
@@ -187,19 +188,21 @@ export default function FamilyMembersPage() {
                 </div>
 
                 <div className="space-y-2 rounded-xl border border-sky-100 bg-sky-50/40 p-3 text-xs text-slate-600">
-                  <div className="flex items-center gap-2">
-                    <Phone className="h-3.5 w-3.5 text-blue-500" />
-                    <span className="font-semibold text-slate-800">{member.phoneNumber}</span>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Phone className="h-3.5 w-3.5 text-blue-500 shrink-0" />
+                    <span className="font-semibold text-slate-800 break-all">
+                      {member.phoneNumber}
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Globe2 className="h-3.5 w-3.5 text-blue-500" />
-                    <span>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Globe2 className="h-3.5 w-3.5 text-blue-500 shrink-0" />
+                    <span className="break-words min-w-0">
                       {getLanguageLabel(member.preferredLanguage)} • {member.timezone}
                     </span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <ShieldCheck className="h-3.5 w-3.5 text-blue-500 shrink-0" />
-                    <span>
+                  <div className="flex items-start gap-2 min-w-0">
+                    <ShieldCheck className="h-3.5 w-3.5 text-blue-500 shrink-0 mt-0.5" />
+                    <span className="break-words min-w-0">
                       Calls: <strong className="text-slate-800">{member.voiceCallingConsentStatus}</strong>{' '}
                       • Transcript:{' '}
                       <strong className="text-slate-800">

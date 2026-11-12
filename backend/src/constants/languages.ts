@@ -224,7 +224,7 @@ export function checkSarvamLanguageSupport(
     return {
       supported: false,
       language: null,
-      reason: `Requested language "${requestedCodeOrName}" is not recognized for Sarvam Voice Agents.`,
+      reason: `Requested language "${requestedCodeOrName}" is not supported for live voice calling.`,
       availableFallbackLanguages,
     };
   }
@@ -233,7 +233,7 @@ export function checkSarvamLanguageSupport(
     return {
       supported: false,
       language: matched,
-      reason: `Requested language ${matched.name} (${matched.bcp47}) is not supported by Sarvam Voice Agents.`,
+      reason: `Requested language ${matched.name} (${matched.bcp47}) is not supported for live voice calling.`,
       availableFallbackLanguages,
     };
   }
@@ -242,7 +242,7 @@ export function checkSarvamLanguageSupport(
     return {
       supported: false,
       language: matched,
-      reason: `Requested language ${matched.name} (${matched.bcp47}) is not enabled in SARVAM_ALLOWED_LANGUAGES.`,
+      reason: `Requested language ${matched.name} (${matched.bcp47}) is not enabled for live voice calling.`,
       availableFallbackLanguages,
     };
   }

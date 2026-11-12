@@ -26,7 +26,7 @@ export function WeeklyCallsChart({ data }: { data: CallDayPoint[] }) {
 
   if (!hasCalls) {
     return (
-      <div className="flex h-64 items-center justify-center rounded-xl border border-dashed border-sky-200 bg-sky-50/40 px-4 text-center">
+      <div className="flex h-56 sm:h-64 w-full min-w-0 items-center justify-center rounded-xl border border-dashed border-sky-200 bg-sky-50/40 px-4 text-center">
         <div>
           <p className="text-sm font-semibold text-slate-700">No calling activity in the past 7 days</p>
           <p className="mt-1 text-xs text-slate-500">
@@ -38,21 +38,23 @@ export function WeeklyCallsChart({ data }: { data: CallDayPoint[] }) {
   }
 
   return (
-    <div className="h-64 w-full">
+    <div className="h-56 sm:h-64 w-full min-w-0">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 10, right: 12, left: -18, bottom: 0 }}>
+        <BarChart data={data} margin={{ top: 10, right: 8, left: -20, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#E0F2FE" vertical={false} />
           <XAxis
             dataKey="label"
             axisLine={false}
             tickLine={false}
-            tick={{ fill: '#64748B', fontSize: 12 }}
+            tick={{ fill: '#64748B', fontSize: 11 }}
+            interval="preserveStartEnd"
           />
           <YAxis
             allowDecimals={false}
             axisLine={false}
             tickLine={false}
-            tick={{ fill: '#64748B', fontSize: 12 }}
+            tick={{ fill: '#64748B', fontSize: 11 }}
+            width={36}
           />
           <Tooltip
             contentStyle={{
@@ -64,7 +66,7 @@ export function WeeklyCallsChart({ data }: { data: CallDayPoint[] }) {
               fontSize: '12px',
             }}
           />
-          <Legend wrapperStyle={{ fontSize: '12px', color: '#475569' }} />
+          <Legend wrapperStyle={{ fontSize: '11px', color: '#475569', paddingTop: '6px' }} />
           <Bar dataKey="completed" name="Completed" fill="#2563EB" radius={[6, 6, 0, 0]} />
           <Bar dataKey="callbacks" name="Callbacks" fill="#0EA5E9" radius={[6, 6, 0, 0]} />
           <Bar dataKey="missed" name="Missed" fill="#F59E0B" radius={[6, 6, 0, 0]} />

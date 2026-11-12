@@ -26,6 +26,11 @@ import { apiRequest } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { CONSENT_TYPE_META, DOSE_STATUS_META, getLanguageLabel } from '@/lib/constants';
 import { formatDateTimeInTz } from '@/lib/utils';
+import {
+  getCallModeDisplay,
+  getCallOutcomeDisplay,
+  getCallTypeDisplay,
+} from '@/lib/voiceDisplay';
 import type { ConsentStatus, ConsentType, FamilyMember } from '@/types';
 
 interface MemberProfilePayload {
@@ -105,22 +110,22 @@ export default function FamilyMemberProfilePage() {
   return (
     <div className="space-y-6 animate-fade-up">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <Button asChild variant="outline" size="icon">
+        <div className="flex items-start sm:items-center gap-3 min-w-0">
+          <Button asChild variant="outline" size="icon" className="shrink-0">
             <Link href="/family">
               <ArrowLeft className="h-4 w-4" />
             </Link>
           </Button>
-          <div>
-            <div className="flex items-center gap-2.5">
-              <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900 break-words">
                 {member.fullName}
               </h1>
               <Badge variant={member.isActive ? 'success' : 'neutral'}>
                 {member.isActive ? 'Active' : 'Inactive'}
               </Badge>
             </div>
-            <p className="text-sm text-slate-500">
+            <p className="text-xs sm:text-sm text-slate-500 break-words">
               {member.relationship}
               {member.age ? ` • ${member.age} years` : ''} •{' '}
               {getLanguageLabel(member.preferredLanguage)}
@@ -129,7 +134,7 @@ export default function FamilyMemberProfilePage() {
         </div>
 
         {canEdit ? (
-          <Button onClick={() => setEditOpen(true)}>
+          <Button onClick={() => setEditOpen(true)} className="w-full sm:w-auto">
             <Edit3 className="h-4 w-4" />
             Edit Profile
           </Button>
@@ -200,21 +205,21 @@ export default function FamilyMemberProfilePage() {
 
       {/* Tabs: Medicines, Dose History, Call History, Consents */}
       <Tabs defaultValue="medicines">
-        <TabsList className="flex-wrap h-auto">
+        <TabsList className="grid grid-cols-2 sm:inline-flex w-full sm:w-auto gap-1">
           <TabsTrigger value="medicines">Assigned Medicines ({medicines.length})</TabsTrigger>
           <TabsTrigger value="doses">Medicine History ({doseHistory.length})</TabsTrigger>
           <TabsTrigger value="calls">Call History ({callHistory.length})</TabsTrigger>
-          <TabsTrigger value="consents">Consents & Preferences</TabsTrigger>
+          <TabsTrigger value="consents">Consents &amp; Preferences</TabsTrigger>
         </TabsList>
 
         <TabsContent value="medicines">
           <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
+            <CardHeader className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <CardTitle>Assigned Prescriptions</CardTitle>
                 <CardDescription>Active and past medicines for {member.fullName}</CardDescription>
               </div>
-              <Button asChild size="sm">
+              <Button asChild size="sm" className="w-full sm:w-auto">
                 <Link href="/medicines">Manage Medicines</Link>
               </Button>
             </CardHeader>
@@ -313,29 +318,40 @@ export default function FamilyMemberProfilePage() {
                 <EmptyState
                   icon={PhoneCall}
                   title="No calls placed yet"
-                  description="Calls placed in mock or live Sarvam mode will be logged here."
+                  description="Calls placed in Test Environment or Live Voice mode will appear here."
                 />
               ) : (
                 <div className="space-y-2.5">
-                  {callHistory.map((call) => (
-                    <Link
-                      key={String(call._id)}
-                      href={`/calls/${String(call._id)}`}
-                      className="flex items-center justify-between rounded-xl border border-sky-100 bg-white p-3.5 hover:bg-sky-50/50 transition-colors"
-                    >
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">
-                          {String(call.callType).replace(/_/g, ' ')} •{' '}
-                          {getLanguageLabel(String(call.language || member.preferredLanguage))}
-                        </p>
-                        <p className="text-xs text-slate-500">
-                          {formatDateTimeInTz(call.createdAt as string, member.timezone)} •{' '}
-                          {String(call.durationSeconds ?? 0)}s
-                        </p>
-                      </div>
-                      <Badge variant="indigo">{String(call.outcome || '')}</Badge>
-                    </Link>
-                  ))}
+                  {callHistory.map((call) => {
+                    const modeDisplay = getCallModeDisplay(
+                      Boolean(call.isMock) || String(call.mode || '') === 'mock'
+                    );
+                    const outcomeDisplay = getCallOutcomeDisplay(String(call.outcome || ''));
+                    return (
+                      <Link
+                        key={String(call._id)}
+                        href={`/calls/${String(call._id)}`}
+                        className="flex items-center justify-between gap-2 rounded-xl border border-sky-100 bg-white p-3.5 hover:bg-sky-50/50 transition-colors"
+                      >
+                        <div>
+                          <p className="text-sm font-bold text-slate-900">
+                            {getCallTypeDisplay(String(call.callType || ''))} •{' '}
+                            {getLanguageLabel(String(call.language || member.preferredLanguage))}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {formatDateTimeInTz(call.createdAt as string, member.timezone)} •{' '}
+                            {String(call.durationSeconds ?? 0)}s
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <Badge variant={modeDisplay.badgeVariant}>{modeDisplay.shortLabel}</Badge>
+                          <Badge variant={outcomeDisplay.badgeVariant}>
+                            {outcomeDisplay.label}
+                          </Badge>
+                        </div>
+                      </Link>
+                    );
+                  })}
                 </div>
               )}
             </CardContent>
@@ -385,7 +401,7 @@ export default function FamilyMemberProfilePage() {
                         <p className="text-[11px] text-amber-800">{meta.retentionNote}</p>
                       ) : null}
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="w-full sm:w-40 shrink-0">
                       <SelectNative
                         disabled={!canEdit}
                         value={consent.status}
@@ -395,7 +411,7 @@ export default function FamilyMemberProfilePage() {
                             e.target.value as ConsentStatus
                           )
                         }
-                        className="w-40"
+                        className="w-full"
                       >
                         <option value="GRANTED">Granted</option>
                         <option value="PENDING">Pending</option>

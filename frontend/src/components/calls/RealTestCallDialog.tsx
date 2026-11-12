@@ -29,6 +29,16 @@ import {
   SUPPORTED_LANGUAGES,
 } from '@/lib/constants';
 import { formatDateTimeInTz } from '@/lib/utils';
+import {
+  formatConfigFieldLabel,
+  getCallLifecycleDisplay,
+  getCallOutcomeDisplay,
+  getPreflightCheckDisplayLabel,
+  getRawServiceStatusDisplay,
+  getVoiceModeHeaderLabel,
+  sanitizeVoiceText,
+  translateVoiceError,
+} from '@/lib/voiceDisplay';
 import type {
   CallLifecycleStatus,
   CallType,
@@ -125,6 +135,7 @@ const TERMINAL_CALL_STATUSES: CallLifecycleStatus[] = [
   'REJECTED',
   'NOT_CONNECTED',
   'CANCELLED',
+  'PROVIDER_UNAVAILABLE',
   'LANGUAGE_UNAVAILABLE',
   'LANGUAGE_FALLBACK_REQUIRED',
 ];
@@ -159,7 +170,7 @@ export function RealTestCallDialog({
   const [familyMemberId, setFamilyMemberId] = useState('');
   const [doseInstanceId, setDoseInstanceId] = useState('');
   const [callType, setCallType] = useState<CallType>('MEDICINE_REMINDER');
-  const [purpose, setPurpose] = useState('Admin-authorized Sarvam Vobiz supervised test call');
+  const [purpose, setPurpose] = useState('Admin-authorized CareVoice supervised test call');
   const [overrideQuietHours, setOverrideQuietHours] = useState(false);
   const [confirmedByAdmin, setConfirmedByAdmin] = useState(false);
 
@@ -198,7 +209,10 @@ export function RealTestCallDialog({
       }
     } catch (err) {
       setError(
-        err instanceof ApiClientError ? err.message : 'Unable to load real-call preflight data.'
+        translateVoiceError(
+          err instanceof ApiClientError ? err.message : undefined,
+          'Unable to load voice service readiness checks.'
+        )
       );
     } finally {
       setLoadingInit(false);
@@ -269,7 +283,7 @@ export function RealTestCallDialog({
           onCallStartedOrUpdated(snapshot._id);
         }
       } catch {
-        // Keep polling gently unless modal closes
+        // Keep polling gently until terminal state or modal close
       }
     }, 4000);
 
@@ -366,7 +380,7 @@ export function RealTestCallDialog({
       onCallStartedOrUpdated(res.callLog._id);
     } catch (err) {
       if (err instanceof ApiClientError) {
-        setError(err.message);
+        setError(translateVoiceError(err.message, 'Failed to place live test call.'));
         const maybeDetails = err.details as
           | {
               callLogId?: string;
@@ -391,7 +405,7 @@ export function RealTestCallDialog({
           }
         }
       } else {
-        setError('Failed to place real Sarvam outbound call.');
+        setError('Unable to initiate the CareVoice live call. Please check service status.');
       }
     } finally {
       setSubmitting(false);
@@ -412,7 +426,10 @@ export function RealTestCallDialog({
       }
     } catch (err) {
       setError(
-        err instanceof ApiClientError ? err.message : 'Unable to sync call status from Sarvam.'
+        translateVoiceError(
+          err instanceof ApiClientError ? err.message : undefined,
+          'Unable to sync call status.'
+        )
       );
     } finally {
       setSyncingStatus(false);
@@ -426,7 +443,7 @@ export function RealTestCallDialog({
       await apiRequest(`/voice-calls/${activeCall._id}/cancel`, {
         method: 'POST',
         body: JSON.stringify({
-          reason: 'Cancelled by Admin from Real Test Call dialog',
+          reason: 'Cancelled by Admin from Place Real Test Call console',
         }),
       });
       const updated = await apiRequest<CallStatusSnapshot>(
@@ -436,7 +453,10 @@ export function RealTestCallDialog({
       onCallStartedOrUpdated(updated._id);
     } catch (err) {
       setError(
-        err instanceof ApiClientError ? err.message : 'Unable to cancel active call.'
+        translateVoiceError(
+          err instanceof ApiClientError ? err.message : undefined,
+          'Unable to cancel active call.'
+        )
       );
     } finally {
       setCancelling(false);
@@ -451,13 +471,12 @@ export function RealTestCallDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-slate-900">
             <PhoneCall className="h-5 w-5 text-blue-600" />
-            Place Real Outbound Call (Sarvam Instant Outbound)
+            Place Real Test Call
           </DialogTitle>
           <DialogDescription>
-            ADMIN-only live outbound call via Sarvam Instant Outbound API (supports Rent from Sarvam
-            native Vobiz without requiring a Campaign or Inbound Deployment). Verifies E.164 phone
-            number, calling consent, separate recording/transcript consent, and HTTPS webhooks
-            before dialing.
+            Administrator-authorized live call via CareVoice Voice Service. Verifies E.164 phone
+            format, independent calling, transcript, and audio recording consents, and secure call
+            event delivery before dialing.
           </DialogDescription>
         </DialogHeader>
 
@@ -467,7 +486,7 @@ export function RealTestCallDialog({
             <div className="flex items-center gap-2">
               <ShieldCheck className="h-4 w-4 text-blue-600" />
               <span className="text-xs font-bold uppercase tracking-wide text-blue-800">
-                Sarvam Live Preflight Check
+                CareVoice Voice Service Readiness
               </span>
             </div>
             <Button
@@ -486,16 +505,18 @@ export function RealTestCallDialog({
             <div className="space-y-2 text-xs">
               <div className="flex flex-wrap gap-2">
                 <Badge variant={preflight.telephonyReady ? 'success' : 'warning'}>
-                  Mode: {preflight.configuredMode.toUpperCase()} / Telephony:{' '}
-                  {preflight.telephonyReady ? 'ENABLED' : 'LOCKED'}
+                  {getVoiceModeHeaderLabel(preflight.configuredMode)} •{' '}
+                  {preflight.telephonyReady ? 'Live Service Enabled' : 'Safely Disabled'}
                 </Badge>
                 <Badge variant={preflight.webhookReady ? 'success' : 'danger'}>
-                  HTTPS Webhook: {preflight.webhookReady ? 'Ready' : 'Not Ready'}
+                  Call Event Connection: {preflight.webhookReady ? 'Ready' : 'Not Configured'}
                 </Badge>
                 {preflight.callerIdMasked ? (
-                  <Badge variant="default">Caller ID: {preflight.callerIdMasked}</Badge>
+                  <Badge variant="default">
+                    CareVoice Calling Number: {preflight.callerIdMasked}
+                  </Badge>
                 ) : null}
-                <Badge variant="neutral">Agent v{preflight.agentVersion}</Badge>
+                <Badge variant="neutral">Voice Profile v{preflight.agentVersion}</Badge>
               </div>
 
               {preflight.deploymentCheck ? (
@@ -510,93 +531,96 @@ export function RealTestCallDialog({
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="font-bold">
-                      Sarvam Instant Outbound Preflight ({preflight.deploymentCheck.status.replace(/_/g, ' ').toUpperCase()}
-                      {preflight.deploymentCheck.upstreamStatus
-                        ? ` • HTTP ${preflight.deploymentCheck.upstreamStatus}`
-                        : ''}
-                      ):
+                      Voice Service Preflight Status
+                      {preflight.deploymentCheck.instantOutboundReady
+                        ? ' — Ready for Outbound Calling'
+                        : ' — Attention Required'}
                     </p>
-                    {preflight.deploymentCheck.authCategory &&
-                    preflight.deploymentCheck.authCategory !== 'VERIFIED' ? (
-                      <Badge
-                        variant={
-                          preflight.deploymentCheck.instantOutboundReady ? 'warning' : 'danger'
-                        }
-                      >
-                        {preflight.deploymentCheck.authCategory.replace(/_/g, ' ')}
-                      </Badge>
-                    ) : (
-                      <Badge variant="success">FULLY VERIFIED</Badge>
-                    )}
-                  </div>
-
-                  {/* Separated Readiness Planes */}
-                  <div className="flex flex-wrap gap-1.5">
                     <Badge
                       variant={
-                        preflight.deploymentCheck.instantOutboundReady ? 'success' : 'danger'
+                        preflight.deploymentCheck.verified
+                          ? 'success'
+                          : preflight.deploymentCheck.instantOutboundReady
+                            ? 'warning'
+                            : 'danger'
                       }
                     >
-                      Instant Outbound:{' '}
-                      {preflight.deploymentCheck.instantOutboundReady ? 'READY' : 'LOCKED'}
-                    </Badge>
-                    <Badge
-                      variant={
-                        preflight.deploymentCheck.inboundDeploymentReady ? 'success' : 'neutral'
-                      }
-                    >
-                      Inbound Deployment:{' '}
-                      {preflight.deploymentCheck.inboundDeploymentReady
-                        ? 'ACTIVE'
-                        : 'Not Required for Outbound'}
-                    </Badge>
-                    <Badge variant={preflight.deploymentCheck.campaignReady ? 'success' : 'neutral'}>
-                      Bulk Campaign:{' '}
-                      {preflight.deploymentCheck.campaignReady
-                        ? 'MATCHED'
-                        : 'Not Required for Instant Outbound'}
+                      {preflight.deploymentCheck.verified
+                        ? 'Verified'
+                        : preflight.deploymentCheck.instantOutboundReady
+                          ? 'Ready'
+                          : 'Unavailable'}
                     </Badge>
                   </div>
 
-                  <p>{preflight.deploymentCheck.message}</p>
+                  <p>{sanitizeVoiceText(preflight.deploymentCheck.message)}</p>
 
-                  {/* 7 Independent Preflight Checks */}
                   {preflight.deploymentCheck.checks ? (
                     <div className="rounded-xl border border-slate-200/80 bg-white/90 p-2.5 space-y-1.5 text-slate-800">
                       <p className="text-[11px] font-bold uppercase tracking-wide text-slate-600">
-                        7 Independent Preflight Checks (Rent from Sarvam / Sarvam Vobiz)
+                        Service Readiness Checks
                       </p>
                       <div className="grid grid-cols-1 gap-1.5">
                         {[
-                          preflight.deploymentCheck.checks.apiAuthentication,
-                          preflight.deploymentCheck.checks.agentIdAndVersion,
-                          preflight.deploymentCheck.checks.connectionIdValidity,
-                          preflight.deploymentCheck.checks.callerNumberAvailability,
-                          preflight.deploymentCheck.checks.outboundCapability,
-                          preflight.deploymentCheck.checks.webhookReadiness,
-                          preflight.deploymentCheck.checks.dynamicVariableCompatibility,
-                        ].map((chk) => {
+                          {
+                            key: 'auth',
+                            check: preflight.deploymentCheck.checks.apiAuthentication,
+                          },
+                          {
+                            key: 'profile',
+                            check: preflight.deploymentCheck.checks.agentIdAndVersion,
+                          },
+                          {
+                            key: 'connection',
+                            check: preflight.deploymentCheck.checks.connectionIdValidity,
+                          },
+                          {
+                            key: 'caller',
+                            check: preflight.deploymentCheck.checks.callerNumberAvailability,
+                          },
+                          {
+                            key: 'outbound',
+                            check: preflight.deploymentCheck.checks.outboundCapability,
+                          },
+                          {
+                            key: 'webhook',
+                            check: preflight.deploymentCheck.checks.webhookReadiness,
+                          },
+                          {
+                            key: 'vars',
+                            check: preflight.deploymentCheck.checks.dynamicVariableCompatibility,
+                          },
+                        ].map(({ key, check }) => {
                           const badgeVariant =
-                            chk.status === 'VERIFIED' || chk.status === 'READY'
+                            check.status === 'VERIFIED' || check.status === 'READY'
                               ? 'success'
-                              : chk.status === 'CONNECTION_VERIFICATION_UNAVAILABLE' ||
-                                  chk.status === 'UNVERIFIED'
+                              : check.status === 'CONNECTION_VERIFICATION_UNAVAILABLE' ||
+                                  check.status === 'UNVERIFIED'
                                 ? 'warning'
                                 : 'danger';
+                          const statusText =
+                            check.status === 'VERIFIED'
+                              ? 'Verified'
+                              : check.status === 'READY'
+                                ? 'Ready'
+                                : check.status === 'CONNECTION_VERIFICATION_UNAVAILABLE' ||
+                                    check.status === 'UNVERIFIED'
+                                  ? 'Limited Telemetry'
+                                  : 'Action Needed';
                           return (
                             <div
-                              key={chk.label}
+                              key={key}
                               className="rounded-lg border border-slate-200/70 bg-slate-50/70 px-2.5 py-1.5 flex flex-col gap-0.5"
                             >
                               <div className="flex flex-wrap items-center justify-between gap-1.5">
                                 <span className="font-semibold text-[11px] text-slate-900">
-                                  {chk.label}
+                                  {getPreflightCheckDisplayLabel(check.label)}
                                 </span>
-                                <Badge variant={badgeVariant}>
-                                  {chk.status}
-                                </Badge>
+                                <Badge variant={badgeVariant}>{statusText}</Badge>
                               </div>
-                              <p className="text-[10.5px] text-slate-600">{chk.detail}</p>
+                              <p className="text-[10.5px] text-slate-600">
+                                {sanitizeVoiceText(check.detail)}
+                              </p>
                             </div>
                           );
                         })}
@@ -613,177 +637,10 @@ export function RealTestCallDialog({
                       }`}
                     >
                       <strong>
-                        {preflight.deploymentCheck.instantOutboundReady
-                          ? 'Instant Outbound Note:'
-                          : 'Fix Action:'}
+                        {preflight.deploymentCheck.instantOutboundReady ? 'Service Note:' : 'Action Needed:'}
                       </strong>{' '}
-                      {preflight.deploymentCheck.diagnosticHint}
+                      {sanitizeVoiceText(preflight.deploymentCheck.diagnosticHint)}
                     </p>
-                  ) : null}
-                  {preflight.deploymentCheck.credentialsSharedWithOutbound ? (
-                    <p className="text-[11px] opacity-85">
-                      Auth header: <code>{preflight.deploymentCheck.authHeader || 'X-API-Key'}</code>{' '}
-                      (read-only GET verification with same workspace credentials used by Sarvam
-                      Instant Outbound API; never places a call during preflight).
-                    </p>
-                  ) : null}
-
-                  {preflight.deploymentCheck.workspaceDiscovery ? (
-                    <div className="mt-2 rounded-xl border border-sky-200 bg-white/95 p-3 text-[11px] text-slate-700 space-y-2.5">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="font-bold text-slate-900">
-                          Read-Only Workspace Discovery (No Outbound Dialing / No Logs Viewer)
-                        </span>
-                        <Badge variant="neutral">
-                          {preflight.deploymentCheck.workspaceDiscovery.discoveredApps.length} App(s) Found
-                        </Badge>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px] bg-sky-50/60 border border-sky-100 rounded-lg p-2">
-                        <p>
-                          <span className="text-slate-500">Org ID:</span>{' '}
-                          <code className="font-mono text-slate-900">
-                            {preflight.deploymentCheck.workspaceDiscovery.orgId}
-                          </code>
-                        </p>
-                        <p>
-                          <span className="text-slate-500">Workspace ID:</span>{' '}
-                          <code className="font-mono text-slate-900">
-                            {preflight.deploymentCheck.workspaceDiscovery.workspaceId}
-                          </code>
-                        </p>
-                        <p>
-                          <span className="text-slate-500">Configured App ID:</span>{' '}
-                          <code className="font-mono text-slate-900">
-                            {preflight.deploymentCheck.workspaceDiscovery.configuredAgentId}
-                          </code>
-                        </p>
-                        <p>
-                          <span className="text-slate-500">Expected Version / Caller:</span>{' '}
-                          <code className="font-mono text-slate-900">
-                            v{preflight.deploymentCheck.workspaceDiscovery.configuredAgentVersion} •{' '}
-                            {preflight.deploymentCheck.workspaceDiscovery.configuredPhoneMasked}
-                          </code>
-                        </p>
-                        <p className="sm:col-span-2">
-                          <span className="text-slate-500">Configured Connection ID:</span>{' '}
-                          <code className="font-mono text-slate-900">
-                            {preflight.deploymentCheck.workspaceDiscovery.configuredConnectionId}
-                          </code>
-                        </p>
-                        <p className="sm:col-span-2">
-                          <span className="text-slate-500">Analytics Interactions Probe:</span>{' '}
-                          <span className="font-semibold text-slate-900">
-                            {preflight.deploymentCheck.workspaceDiscovery.analyticsAppCheckStatus
-                              ? `HTTP ${preflight.deploymentCheck.workspaceDiscovery.analyticsAppCheckStatus}`
-                              : 'Not reached'}
-                          </span>
-                          {preflight.deploymentCheck.workspaceDiscovery.analyticsAppCheckDetail
-                            ? ` — ${preflight.deploymentCheck.workspaceDiscovery.analyticsAppCheckDetail}`
-                            : ''}
-                          {' '}
-                          (app lookup only — never treated as telephony verification)
-                        </p>
-                      </div>
-
-                      {preflight.deploymentCheck.workspaceDiscovery.discoveredApps.length > 0 ? (
-                        <div className="space-y-1.5">
-                          <p className="font-semibold text-slate-800">
-                            Discovered Agents in This Workspace:
-                          </p>
-                          {preflight.deploymentCheck.workspaceDiscovery.discoveredApps.map((appItem) => (
-                            <div
-                              key={appItem.appId}
-                              className="rounded-lg border border-sky-100 bg-sky-50/40 px-2.5 py-2 space-y-1"
-                            >
-                              <div className="flex flex-wrap items-center justify-between gap-1.5">
-                                <code className="font-mono font-bold text-slate-900">
-                                  {appItem.appId}
-                                </code>
-                                <div className="flex flex-wrap gap-1">
-                                  <Badge
-                                    variant={appItem.matchesConfiguredAppId ? 'success' : 'warning'}
-                                  >
-                                    {appItem.matchesConfiguredAppId
-                                      ? 'Matches Configured App ID'
-                                      : 'Different App ID Found'}
-                                  </Badge>
-                                  {appItem.sources.map((src) => (
-                                    <Badge key={src} variant="neutral">
-                                      {src}
-                                    </Badge>
-                                  ))}
-                                </div>
-                              </div>
-                              <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-600">
-                                <span>
-                                  Versions:{' '}
-                                  <strong>
-                                    {appItem.versions.length > 0
-                                      ? appItem.versions.map((v) => `v${v}`).join(', ')
-                                      : 'None surfaced'}
-                                  </strong>
-                                </span>
-                                {appItem.statuses.length > 0 ? (
-                                  <span>
-                                    Status: <strong>{appItem.statuses.join(', ')}</strong>
-                                  </span>
-                                ) : null}
-                                {appItem.connectionIds.length > 0 ? (
-                                  <span>
-                                    Connections:{' '}
-                                    <code className="font-mono">
-                                      {appItem.connectionIds.join(', ')}
-                                    </code>
-                                  </span>
-                                ) : null}
-                                {appItem.phoneNumbersMasked.length > 0 ? (
-                                  <span>
-                                    Phones:{' '}
-                                    <strong>{appItem.phoneNumbersMasked.join(', ')}</strong>
-                                  </span>
-                                ) : null}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="rounded-lg border border-sky-200 bg-sky-50/70 px-2.5 py-2 text-slate-700">
-                          No Inbound Deployments, Bulk Campaigns, Experiments, or Test Suites currently
-                          reference an <code>app_id</code> in this workspace. Note: Instant Outbound calls
-                          do not require a Campaign ID or Deployment ID, and{' '}
-                          <strong>Rent from Sarvam</strong> numbers/connections live natively in{' '}
-                          <strong>Deploy → Phone Numbers</strong> (no external Vobiz credentials needed).
-                        </div>
-                      )}
-
-                      {preflight.deploymentCheck.workspaceDiscovery.discoveredConnections.length > 0 ? (
-                        <div className="space-y-1">
-                          <p className="font-semibold text-slate-800">
-                            Discovered Telephony Connections:
-                          </p>
-                          <div className="flex flex-wrap gap-1.5">
-                            {preflight.deploymentCheck.workspaceDiscovery.discoveredConnections.map(
-                              (conn) => (
-                                <div
-                                  key={`${conn.source}-${conn.connectionId}`}
-                                  className="rounded-md border border-sky-100 bg-white px-2 py-1 text-[10px]"
-                                >
-                                  <code className="font-mono text-slate-900">
-                                    {conn.connectionId}
-                                  </code>{' '}
-                                  ({conn.source}
-                                  {conn.phoneNumbersMasked.length > 0
-                                    ? ` • ${conn.phoneNumbersMasked.join(', ')}`
-                                    : ''}
-                                  )
-                                </div>
-                              )
-                            )}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
                   ) : null}
                 </div>
               ) : null}
@@ -792,20 +649,20 @@ export function RealTestCallDialog({
               (preflight.missingTelephonyFields.length > 0 ||
                 preflight.missingWebhookFields.length > 0) ? (
                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
-                  <p className="font-bold">Real calling is currently locked on backend:</p>
+                  <p className="font-bold">Live calling is currently locked in server settings:</p>
                   <p>
                     Missing:{' '}
-                    {[...preflight.missingTelephonyFields, ...preflight.missingWebhookFields].join(
-                      ', '
-                    )}
+                    {[...preflight.missingTelephonyFields, ...preflight.missingWebhookFields]
+                      .map(formatConfigFieldLabel)
+                      .join(', ')}
                   </p>
                 </div>
               ) : null}
             </div>
           ) : (
             <p className="text-xs text-slate-500 flex items-center gap-2">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking Sarvam credentials &
-              deployment status...
+              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking CareVoice Voice Service
+              readiness...
             </p>
           )}
         </div>
@@ -827,7 +684,7 @@ export function RealTestCallDialog({
                 }}
               >
                 <ExternalLink className="h-3.5 w-3.5" />
-                Inspect Failed Call Log
+                Inspect Call Record
               </Button>
             ) : null}
           </div>
@@ -848,8 +705,8 @@ export function RealTestCallDialog({
                   Live Call Tracker
                 </h4>
                 {providerAcceptInfo ? (
-                  <p className="text-xs text-slate-500">
-                    Sarvam HTTP {providerAcceptInfo.httpStatus} • Attempt ID:{' '}
+                  <p className="text-xs text-slate-500 break-all">
+                    Reference ID:{' '}
                     <code className="font-mono text-slate-700">{providerAcceptInfo.attemptId}</code>
                   </p>
                 ) : null}
@@ -863,16 +720,16 @@ export function RealTestCallDialog({
                   disabled={syncingStatus}
                 >
                   <RefreshCw className={`h-3.5 w-3.5 ${syncingStatus ? 'animate-spin' : ''}`} />
-                  Sync Status Now
+                  Sync Call Status
                 </Button>
                 <Badge variant={getCallLifecycleBadgeVariant(activeCall.callStatus)}>
-                  {activeCall.callStatus}
+                  {getCallLifecycleDisplay(activeCall.callStatus).label}
                 </Badge>
               </div>
             </div>
 
             {/* Lifecycle Step Bar */}
-            <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 text-center">
+            <div className="grid grid-cols-2 min-[420px]:grid-cols-3 sm:grid-cols-6 gap-1.5 text-center">
               {LIFECYCLE_STEPS.map((step) => {
                 const currentIdx = LIFECYCLE_STEPS.indexOf(activeCall.callStatus);
                 const stepIdx = LIFECYCLE_STEPS.indexOf(step);
@@ -886,7 +743,7 @@ export function RealTestCallDialog({
                         : 'border-slate-200 bg-slate-50 text-slate-400'
                     }`}
                   >
-                    {step}
+                    {getCallLifecycleDisplay(step).label}
                   </div>
                 );
               })}
@@ -894,28 +751,29 @@ export function RealTestCallDialog({
 
             {isTerminal && activeCall.callStatus !== 'COMPLETED' ? (
               <div className="rounded-xl border border-amber-200 bg-amber-50/80 px-3 py-2 text-xs text-amber-900">
-                <strong>Terminal Call Outcome:</strong> {activeCall.callStatus} (Provider:{' '}
-                {activeCall.sarvamStatus || activeCall.providerStatusRaw || 'unknown'}) — Dose remains{' '}
-                <strong>{activeCall.medicineConfirmed}</strong>.
+                <strong>Call Status:</strong> {getCallLifecycleDisplay(activeCall.callStatus).label} — Dose
+                remains <strong>{activeCall.medicineConfirmed}</strong>.
               </div>
             ) : !isTerminal ? (
               <p className="rounded-xl border border-sky-100 bg-sky-50/50 px-3 py-2 text-[11px] text-slate-600">
-                Sarvam Instant Outbound sends its post-call webhook once the call finishes or fails to
-                connect (Analytics reconciliation also checks every ~4s with up to ~60s archival delay).
+                CareVoice updates status automatically via Call Event Connection and background
+                reconciliation while the call is active.
               </p>
             ) : null}
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 text-xs">
               <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
-                <p className="text-slate-500">Sarvam Provider Status</p>
+                <p className="text-slate-500">Voice Service Status</p>
                 <p className="font-bold text-slate-800">
-                  {activeCall.sarvamStatus || activeCall.providerStatusRaw || 'initiating'}
+                  {getRawServiceStatusDisplay(
+                    activeCall.sarvamStatus || activeCall.providerStatusRaw
+                  )}
                 </p>
               </div>
               <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
                 <p className="text-slate-500">Outcome / Dose</p>
                 <p className="font-bold text-slate-800">
-                  {activeCall.outcome} • {activeCall.medicineConfirmed}
+                  {getCallOutcomeDisplay(activeCall.outcome).label} • {activeCall.medicineConfirmed}
                 </p>
               </div>
               <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
@@ -946,10 +804,11 @@ export function RealTestCallDialog({
               <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-2.5">
                 <p className="text-slate-500">Last Update / Consents</p>
                 <p className="font-semibold text-slate-800">
-                  T:{activeCall.transcriptConsentGranted ? 'Yes' : 'No'} • R:
+                  Transcript: {activeCall.transcriptConsentGranted ? 'Granted' : 'Withheld'} •
+                  Audio:{' '}
                   {(activeCall.audioRecordingConsentGranted ?? activeCall.recordingConsentGranted)
-                    ? 'Yes'
-                    : 'No'}
+                    ? 'Granted'
+                    : 'Withheld'}
                 </p>
                 <p className="text-[10px] text-slate-500">
                   {activeCall.lastStatusUpdateAt
@@ -961,11 +820,12 @@ export function RealTestCallDialog({
 
             {activeCall.failureReason ? (
               <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-                <strong>Failure / Cancel Reason:</strong> {activeCall.failureReason}
+                <strong>Voice Service Error:</strong>{' '}
+                {translateVoiceError(activeCall.failureReason)}
               </p>
             ) : null}
 
-            <div className="flex flex-wrap justify-end gap-2">
+            <div className="flex flex-col-reverse sm:flex-row sm:flex-wrap sm:justify-end gap-2">
               {!isTerminal ? (
                 <Button
                   type="button"
@@ -973,6 +833,7 @@ export function RealTestCallDialog({
                   size="sm"
                   onClick={handleCancelCall}
                   disabled={cancelling}
+                  className="w-full sm:w-auto"
                 >
                   <PhoneOff className="h-3.5 w-3.5" />
                   {cancelling ? 'Cancelling...' : 'Mark Call Cancelled'}
@@ -986,11 +847,18 @@ export function RealTestCallDialog({
                   onOpenChange(false);
                   onInspectCall(activeCall._id);
                 }}
+                className="w-full sm:w-auto"
               >
                 <ExternalLink className="h-3.5 w-3.5" />
                 Inspect Full Call Detail
               </Button>
-              <Button type="button" variant="outline" size="sm" onClick={() => onOpenChange(false)}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => onOpenChange(false)}
+                className="w-full sm:w-auto"
+              >
                 Close
               </Button>
             </div>
@@ -1024,8 +892,8 @@ export function RealTestCallDialog({
                 >
                   <option value="MEDICINE_REMINDER">Medicine Reminder</option>
                   <option value="MEAL_REMINDER">Meal Reminder</option>
-                  <option value="CONFIRMATION_CALL">Confirmation Call</option>
-                  <option value="CALLBACK">Smart Callback</option>
+                  <option value="CONFIRMATION_CALL">Dose Confirmation</option>
+                  <option value="CALLBACK">Scheduled Callback</option>
                 </SelectNative>
               </div>
             </div>
@@ -1073,14 +941,15 @@ export function RealTestCallDialog({
                       : ''}
                   </p>
                 ) : null}
-                {(fallbackRequiredInfo || selectedLangOption?.sarvamSupported === false) ? (
+                {fallbackRequiredInfo || selectedLangOption?.sarvamSupported === false ? (
                   <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 space-y-2 text-amber-950">
                     <p className="font-bold text-amber-900">
-                      Language Unavailable on Sarvam — Explicit Fallback Permission Required
+                      Language Unavailable — Explicit Fallback Permission Required
                     </p>
                     <p className="text-[11px]">
                       Requested language ({getLanguageLabel(selectedMember.preferredLanguage)}) is not
-                      natively enabled on Sarvam. CareVoice will never silently fall back to Hindi.
+                      natively enabled for live calling. CareVoice will never silently fall back to
+                      another language.
                     </p>
                     <label className="flex items-start gap-2 cursor-pointer font-semibold text-xs">
                       <input
@@ -1089,14 +958,15 @@ export function RealTestCallDialog({
                         onChange={(e) => setAllowLanguageFallback(e.target.checked)}
                         className="mt-0.5 h-4 w-4 rounded border-amber-400 text-blue-600"
                       />
-                      <span>Authorize explicit fallback language for this outbound call:</span>
+                      <span>Authorize explicit fallback language for this call:</span>
                     </label>
                     {allowLanguageFallback ? (
                       <SelectNative
                         value={fallbackLanguage}
                         onChange={(e) => setFallbackLanguage(e.target.value)}
                       >
-                        {(fallbackRequiredInfo?.availableFallbackLanguages ??
+                        {(
+                          fallbackRequiredInfo?.availableFallbackLanguages ??
                           SUPPORTED_LANGUAGES.filter((l) => l.sarvamSupported).map((l) => l.code)
                         ).map((code) => (
                           <option key={code} value={code}>
@@ -1118,7 +988,7 @@ export function RealTestCallDialog({
 
             <div>
               <label className="mb-1 block text-xs font-semibold text-slate-700">
-                Medicine Schedule & Dose Context *
+                Medicine Schedule &amp; Dose Context *
               </label>
               {memberDoses.length === 0 ? (
                 <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
@@ -1176,20 +1046,25 @@ export function RealTestCallDialog({
                   className="mt-0.5 h-4 w-4 rounded border-sky-300 text-blue-600 focus:ring-blue-500"
                 />
                 <span>
-                  I confirm placing ONE real Sarvam Vobiz outbound phone call to{' '}
+                  I confirm placing ONE real CareVoice voice call to{' '}
                   {selectedMember?.phoneNumber || 'the registered E.164 number'}. Dose intake
                   will remain UNCONFIRMED unless explicitly confirmed by the patient.
                 </span>
               </label>
             </div>
 
-            <div className="flex justify-end gap-3 pt-1">
-              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2.5 sm:gap-3 pt-1">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+                className="w-full sm:w-auto"
+              >
                 Cancel
               </Button>
-              <Button type="submit" disabled={!canSubmit}>
+              <Button type="submit" disabled={!canSubmit} className="w-full sm:w-auto">
                 <PhoneCall className="h-4 w-4" />
-                {submitting ? 'Dialing Sarvam Vobiz...' : 'Place Real Test Call'}
+                {submitting ? 'Initiating Call...' : 'Place Real Test Call'}
               </Button>
             </div>
           </form>
@@ -1198,4 +1073,3 @@ export function RealTestCallDialog({
     </Dialog>
   );
 }
-

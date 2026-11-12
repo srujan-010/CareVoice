@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="cv-bg" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2563EB" />
+      <stop offset="100%" stop-color="#0EA5E9" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#cv-bg)" />
+  <path
+    d="M32 49.5C32 49.5 14 38.4 14 24.8C14 19.3 18.4 15 23.8 15C27.2 15 30.2 16.8 32 19.4C33.8 16.8 36.8 15 40.2 15C45.6 15 50 19.3 50 24.8C50 38.4 32 49.5 32 49.5Z"
+    fill="white"
+    fill-opacity="0.18"
+    stroke="white"
+    stroke-width="2.75"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M19.5 31H25.5L28.5 24.5L33 36.5L36.5 28L39 31H44.5"
+    stroke="white"
+    stroke-width="2.75"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>
+

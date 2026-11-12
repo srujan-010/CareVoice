@@ -1,5 +1,52 @@
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') || 'http://localhost:4000/api';
+function resolveApiBase(): string {
+  const raw = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (!raw) return 'http://localhost:4000/api';
+  const stripped = raw.replace(/\/+$/, '');
+  try {
+    const parsed = new URL(stripped);
+    if (!parsed.pathname || parsed.pathname === '/') {
+      return `${stripped}/api`;
+    }
+    return stripped;
+  } catch {
+    return stripped;
+  }
+}
+
+const API_BASE = resolveApiBase();
+
+function formatValidationErrorMessage(payload: {
+  message?: string;
+  details?: unknown;
+} | null, status: number): string {
+  const baseMessage = payload?.message || `Request failed with status ${status}`;
+  if (!payload?.details || typeof payload.details !== 'object') {
+    return baseMessage;
+  }
+
+  const detailsObj = payload.details as {
+    fieldPaths?: Record<string, string[]>;
+    fields?: Record<string, string[]>;
+  };
+  const fieldMap = detailsObj.fieldPaths ?? detailsObj.fields;
+  if (!fieldMap || typeof fieldMap !== 'object') {
+    return baseMessage;
+  }
+
+  const fieldMessages = Object.entries(fieldMap)
+    .flatMap(([field, msgs]) =>
+      Array.isArray(msgs) && msgs.length > 0 ? [`${field}: ${msgs[0]}`] : []
+    )
+    .slice(0, 4);
+
+  if (fieldMessages.length === 0) {
+    return baseMessage;
+  }
+  if (baseMessage.includes(fieldMessages[0])) {
+    return baseMessage;
+  }
+  return `${baseMessage} (${fieldMessages.join('; ')})`;
+}
 
 const TOKEN_KEY = 'carevoice_jwt';
 
@@ -43,11 +90,23 @@ export async function apiRequest<T>(
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers,
-    credentials: 'include',
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers,
+      credentials: 'include',
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw err;
+    }
+    throw new ApiClientError(
+      `Unable to reach CareVoice backend API (${API_BASE}). Please verify your network connection or backend deployment status.`,
+      0,
+      'NETWORK_ERROR'
+    );
+  }
 
   const payload = await response.json().catch(() => null);
 
@@ -59,7 +118,7 @@ export async function apiRequest<T>(
       }
     }
     throw new ApiClientError(
-      payload?.message || `Request failed with status ${response.status}`,
+      formatValidationErrorMessage(payload, response.status),
       response.status,
       payload?.code || 'API_ERROR',
       payload?.details

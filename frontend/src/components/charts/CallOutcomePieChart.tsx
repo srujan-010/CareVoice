@@ -20,7 +20,7 @@ export function CallOutcomePieChart({
 }) {
   if (!data || data.length === 0) {
     return (
-      <div className="flex h-64 items-center justify-center rounded-xl border border-dashed border-sky-200 bg-sky-50/40 px-4 text-center">
+      <div className="flex h-56 sm:h-64 w-full min-w-0 items-center justify-center rounded-xl border border-dashed border-sky-200 bg-sky-50/40 px-4 text-center">
         <div>
           <p className="text-sm font-semibold text-slate-700">No call outcomes recorded yet</p>
           <p className="mt-1 text-xs text-slate-500">
@@ -32,7 +32,7 @@ export function CallOutcomePieChart({
   }
 
   return (
-    <div className="h-64 w-full">
+    <div className="h-60 sm:h-64 w-full min-w-0">
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Pie
@@ -40,9 +40,9 @@ export function CallOutcomePieChart({
             dataKey="count"
             nameKey="outcome"
             cx="50%"
-            cy="46%"
-            innerRadius={48}
-            outerRadius={78}
+            cy="44%"
+            innerRadius="38%"
+            outerRadius="66%"
             paddingAngle={3}
           >
             {data.map((entry) => (
@@ -62,7 +62,7 @@ export function CallOutcomePieChart({
               fontSize: '12px',
             }}
           />
-          <Legend wrapperStyle={{ fontSize: '11px', color: '#475569' }} />
+          <Legend wrapperStyle={{ fontSize: '11px', color: '#475569', paddingTop: '4px' }} />
         </PieChart>
       </ResponsiveContainer>
     </div>

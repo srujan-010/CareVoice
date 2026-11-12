@@ -25,7 +25,7 @@ export function AdherenceTrendChart({ data }: { data: AdherencePoint[] }) {
 
   if (!hasActivity) {
     return (
-      <div className="flex h-64 items-center justify-center rounded-xl border border-dashed border-sky-200 bg-sky-50/40 px-4 text-center">
+      <div className="flex h-56 sm:h-64 w-full min-w-0 items-center justify-center rounded-xl border border-dashed border-sky-200 bg-sky-50/40 px-4 text-center">
         <div>
           <p className="text-sm font-semibold text-slate-700">No dose confirmations recorded yet</p>
           <p className="mt-1 text-xs text-slate-500">
@@ -37,9 +37,9 @@ export function AdherenceTrendChart({ data }: { data: AdherencePoint[] }) {
   }
 
   return (
-    <div className="h-64 w-full">
+    <div className="h-56 sm:h-64 w-full min-w-0">
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 10, right: 12, left: -16, bottom: 0 }}>
+        <AreaChart data={data} margin={{ top: 10, right: 8, left: -20, bottom: 0 }}>
           <defs>
             <linearGradient id="carevoiceBlueGrad" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="#2563EB" stopOpacity={0.28} />
@@ -51,14 +51,16 @@ export function AdherenceTrendChart({ data }: { data: AdherencePoint[] }) {
             dataKey="label"
             axisLine={false}
             tickLine={false}
-            tick={{ fill: '#64748B', fontSize: 12 }}
+            tick={{ fill: '#64748B', fontSize: 11 }}
+            interval="preserveStartEnd"
           />
           <YAxis
             domain={[0, 100]}
             axisLine={false}
             tickLine={false}
-            tick={{ fill: '#64748B', fontSize: 12 }}
+            tick={{ fill: '#64748B', fontSize: 11 }}
             unit="%"
+            width={40}
           />
           <Tooltip
             contentStyle={{

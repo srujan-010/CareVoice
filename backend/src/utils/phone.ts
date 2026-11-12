@@ -27,7 +27,7 @@ export function normalizeAndValidateE164(phone: string, fieldName = 'phoneNumber
     );
   }
 
-  const cleaned = `+${trimmed.slice(1).replace(/[\s()-]/g, '')}`;
+  const cleaned = `+${trimmed.slice(1).replace(/[\s().-]/g, '')}`;
   if (!E164_PHONE_REGEX.test(cleaned)) {
     throw new ValidationError(
       `${fieldName} must be a valid E.164 phone number (+ followed by 7 to 15 digits, no leading 0)`

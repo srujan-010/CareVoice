@@ -182,6 +182,13 @@ export function mapProviderRawStatusToLifecycle(rawStatus?: string): CallLifecyc
     return 'NOT_CONNECTED';
   }
   if (normalized === 'cancelled' || normalized === 'canceled') return 'CANCELLED';
+  if (
+    normalized === 'provider_unavailable' ||
+    normalized === 'service_unavailable' ||
+    normalized === 'unavailable'
+  ) {
+    return 'PROVIDER_UNAVAILABLE';
+  }
   if (normalized === 'failed' || normalized === 'error') return 'FAILED';
   return 'INITIATING';
 }
@@ -518,8 +525,8 @@ export function evaluateSarvamAgentOutcome(
       feelingUnwell: false,
       requestedHelp: false,
       turns: [],
-      aiSummary: `Sarvam outbound call to ${patientName} is currently ${lifecycle}. Awaiting completion.`,
-      safetyFlags: [`SARVAM_${lifecycle}`],
+      aiSummary: `Outbound voice call to ${patientName} is currently ${lifecycle}. Awaiting completion.`,
+      safetyFlags: [`CALL_${lifecycle}`],
       actualLanguageUsed,
     };
   }
@@ -535,8 +542,8 @@ export function evaluateSarvamAgentOutcome(
       feelingUnwell: false,
       requestedHelp: false,
       turns: [],
-      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} had no answer. Dose remains UNCONFIRMED.`,
-      safetyFlags: ['SARVAM_NO_ANSWER', 'DOSE_UNCONFIRMED'],
+      aiSummary: `Outbound voice call to ${patientName} for ${medicineName} had no answer. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['NO_ANSWER', 'DOSE_UNCONFIRMED'],
       actualLanguageUsed,
     };
   }
@@ -552,8 +559,8 @@ export function evaluateSarvamAgentOutcome(
       feelingUnwell: false,
       requestedHelp: false,
       turns: [],
-      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} encountered a busy line. Dose remains UNCONFIRMED.`,
-      safetyFlags: ['SARVAM_BUSY', 'DOSE_UNCONFIRMED'],
+      aiSummary: `Outbound voice call to ${patientName} for ${medicineName} encountered a busy line. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['BUSY', 'DOSE_UNCONFIRMED'],
       actualLanguageUsed,
     };
   }
@@ -569,8 +576,8 @@ export function evaluateSarvamAgentOutcome(
       feelingUnwell: false,
       requestedHelp: false,
       turns: [],
-      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} was rejected. Dose remains UNCONFIRMED.`,
-      safetyFlags: ['SARVAM_REJECTED', 'DOSE_UNCONFIRMED'],
+      aiSummary: `Outbound voice call to ${patientName} for ${medicineName} was rejected. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['REJECTED', 'DOSE_UNCONFIRMED'],
       actualLanguageUsed,
     };
   }
@@ -592,8 +599,8 @@ export function evaluateSarvamAgentOutcome(
       feelingUnwell: false,
       requestedHelp: false,
       turns: [],
-      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} did not connect${reasonText}. Dose remains UNCONFIRMED.`,
-      safetyFlags: ['SARVAM_NOT_CONNECTED', 'DOSE_UNCONFIRMED'],
+      aiSummary: `Outbound voice call to ${patientName} for ${medicineName} did not connect${reasonText}. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['NOT_CONNECTED', 'DOSE_UNCONFIRMED'],
       actualLanguageUsed,
     };
   }
@@ -609,8 +616,31 @@ export function evaluateSarvamAgentOutcome(
       feelingUnwell: false,
       requestedHelp: false,
       turns: [],
-      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} was cancelled before completion. Dose remains UNCONFIRMED.`,
-      safetyFlags: ['SARVAM_CANCELLED', 'DOSE_UNCONFIRMED'],
+      aiSummary: `Outbound voice call to ${patientName} for ${medicineName} was cancelled before completion. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['CANCELLED', 'DOSE_UNCONFIRMED'],
+      actualLanguageUsed,
+    };
+  }
+
+  if (
+    rawStatus === 'provider_unavailable' ||
+    rawStatus === 'service_unavailable' ||
+    rawStatus === 'unavailable'
+  ) {
+    const cleanReason = cleanSarvamSentinel(payload.failure_reason);
+    const reasonText = cleanReason ? ` (${cleanReason})` : '';
+    return {
+      isIntermediateEvent: false,
+      callStatus: 'PROVIDER_UNAVAILABLE',
+      outcome: 'FAILED',
+      durationSeconds,
+      mealConfirmed: null,
+      medicineConfirmed: 'UNCONFIRMED',
+      feelingUnwell: false,
+      requestedHelp: false,
+      turns: [],
+      aiSummary: `Voice service was unavailable while calling ${patientName} for ${medicineName}${reasonText}. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['VOICE_SERVICE_UNAVAILABLE', 'DOSE_UNCONFIRMED'],
       actualLanguageUsed,
     };
   }
@@ -628,8 +658,8 @@ export function evaluateSarvamAgentOutcome(
       feelingUnwell: false,
       requestedHelp: false,
       turns: [],
-      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} failed${reasonText}. Dose remains UNCONFIRMED.`,
-      safetyFlags: ['SARVAM_CALL_FAILED', 'DOSE_UNCONFIRMED'],
+      aiSummary: `Outbound voice call to ${patientName} for ${medicineName} failed${reasonText}. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['CALL_FAILED', 'DOSE_UNCONFIRMED'],
       actualLanguageUsed,
     };
   }
@@ -645,8 +675,8 @@ export function evaluateSarvamAgentOutcome(
       feelingUnwell: false,
       requestedHelp: false,
       turns: [],
-      aiSummary: `Sarvam returned unrecognized status "${rawStatus || 'UNKNOWN'}" for ${patientName}. Dose remains UNCONFIRMED.`,
-      safetyFlags: ['SARVAM_UNRECOGNIZED_STATUS', 'DOSE_UNCONFIRMED'],
+      aiSummary: `Voice service returned unrecognized status "${rawStatus || 'UNKNOWN'}" for ${patientName}. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['UNRECOGNIZED_STATUS', 'DOSE_UNCONFIRMED'],
       actualLanguageUsed,
     };
   }
@@ -745,14 +775,14 @@ export function evaluateSarvamAgentOutcome(
   const aiSummary =
     summaryVar ||
     (medicineConfirmed === 'TAKEN'
-      ? `Sarvam call completed (${durationSeconds}s): ${patientName} explicitly confirmed taking ${medicineName}.`
+      ? `Voice call completed (${durationSeconds}s): ${patientName} explicitly confirmed taking ${medicineName}.`
       : medicineConfirmed === 'NOT_TAKEN'
-        ? `Sarvam call completed (${durationSeconds}s): ${patientName} reported NOT taking ${medicineName}.`
+        ? `Voice call completed (${durationSeconds}s): ${patientName} reported NOT taking ${medicineName}.`
         : outcome === 'CALLBACK_REQUESTED'
-          ? `Sarvam call completed (${durationSeconds}s): ${patientName} requested a callback in ${requestedCallbackDelayMinutes} minutes. Dose stays UNCONFIRMED.`
+          ? `Voice call completed (${durationSeconds}s): ${patientName} requested a callback in ${requestedCallbackDelayMinutes} minutes. Dose stays UNCONFIRMED.`
           : outcome === 'ESCALATED'
-            ? `Sarvam call escalated (${durationSeconds}s): ${patientName} reported feeling unwell or asked for caregiver help.`
-            : `Sarvam call completed (${durationSeconds}s) for ${patientName} regarding ${medicineName}, but explicit medicine intake was not confirmed. Dose remains UNCONFIRMED.`);
+            ? `Voice call escalated (${durationSeconds}s): ${patientName} reported feeling unwell or asked for caregiver help.`
+            : `Voice call completed (${durationSeconds}s) for ${patientName} regarding ${medicineName}, but explicit medicine intake was not confirmed. Dose remains UNCONFIRMED.`);
 
   return {
     isIntermediateEvent: false,

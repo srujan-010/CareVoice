@@ -116,9 +116,9 @@ export default function SchedulesPage() {
   return (
     <div className="space-y-6 animate-fade-up">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
-            Dose Schedules & Job Engine
+        <div className="min-w-0">
+          <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900">
+            Dose Schedules &amp; Job Engine
           </h1>
           <p className="text-sm text-slate-500">
             Every dose instance maintains separate meal reminder, medicine call, and confirmation
@@ -133,21 +133,27 @@ export default function SchedulesPage() {
             </Badge>
           ) : null}
           {canEdit ? (
-            <Button onClick={handleGenerate} disabled={generating} variant="secondary">
+            <Button
+              onClick={handleGenerate}
+              disabled={generating}
+              variant="secondary"
+              className="w-full min-[420px]:w-auto"
+            >
               <Sparkles className="h-4 w-4" />
               {generating ? 'Generating...' : 'Generate Upcoming Doses'}
             </Button>
           ) : null}
-          <Button variant="outline" onClick={loadDoses}>
+          <Button variant="outline" onClick={loadDoses} className="w-full min-[420px]:w-auto">
             <RefreshCw className="h-4 w-4" />
+            <span className="min-[420px]:hidden">Refresh</span>
           </Button>
         </div>
       </div>
 
       {/* Filters */}
       <Card>
-        <CardContent className="p-4 flex flex-col sm:flex-row gap-3">
-          <div className="sm:w-52">
+        <CardContent className="p-4 flex flex-col sm:flex-row sm:items-end gap-3">
+          <div className="w-full sm:w-52">
             <label className="mb-1 block text-[11px] font-semibold text-slate-500">
               Patient Local Date
             </label>
@@ -157,7 +163,7 @@ export default function SchedulesPage() {
               onChange={(e) => setSelectedDate(e.target.value)}
             />
           </div>
-          <div className="sm:w-64">
+          <div className="w-full sm:w-64">
             <label className="mb-1 block text-[11px] font-semibold text-slate-500">
               Family Member
             </label>
@@ -174,7 +180,11 @@ export default function SchedulesPage() {
             </SelectNative>
           </div>
           <div className="flex items-end">
-            <Button variant="ghost" onClick={() => setSelectedDate('')}>
+            <Button
+              variant="ghost"
+              onClick={() => setSelectedDate('')}
+              className="w-full sm:w-auto"
+            >
               Show All Dates
             </Button>
           </div>

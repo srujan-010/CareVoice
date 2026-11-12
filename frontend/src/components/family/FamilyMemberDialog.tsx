@@ -22,6 +22,16 @@ interface FamilyMemberDialogProps {
   onSaved: () => void;
 }
 
+function normalizePhoneInput(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('+')) return trimmed;
+  return `+${trimmed.slice(1).replace(/[\s().-]/g, '')}`;
+}
+
+function isValidE164Client(phone: string): boolean {
+  return /^\+[1-9]\d{6,14}$/.test(phone);
+}
+
 export function FamilyMemberDialog({
   open,
   onOpenChange,
@@ -45,8 +55,8 @@ export function FamilyMemberDialog({
 
   const [quietStart, setQuietStart] = useState('22:00');
   const [quietEnd, setQuietEnd] = useState('06:30');
-  const [maxRetries, setMaxRetries] = useState(2);
-  const [retryIntervalMinutes, setRetryIntervalMinutes] = useState(10);
+  const [maxRetries, setMaxRetries] = useState('2');
+  const [retryIntervalMinutes, setRetryIntervalMinutes] = useState('10');
   const [allowMealReminders, setAllowMealReminders] = useState(true);
   const [allowMedicineReminders, setAllowMedicineReminders] = useState(true);
   const [allowConfirmationCalls, setAllowConfirmationCalls] = useState(true);
@@ -65,17 +75,21 @@ export function FamilyMemberDialog({
     if (member) {
       setFullName(member.fullName);
       setPhoneNumber(member.phoneNumber);
-      setAge(member.age !== undefined ? String(member.age) : '');
-      setPreferredLanguage(member.preferredLanguage);
-      setTimezone(member.timezone);
-      setRelationship(member.relationship);
+      setAge(
+        member.age !== undefined && member.age !== null && Number.isFinite(Number(member.age))
+          ? String(member.age)
+          : ''
+      );
+      setPreferredLanguage(member.preferredLanguage || 'te');
+      setTimezone(member.timezone || 'Asia/Kolkata');
+      setRelationship(member.relationship || 'Mother');
       setEcName(member.emergencyContact?.name || '');
       setEcPhone(member.emergencyContact?.phoneNumber || '');
-      setEcRelationship(member.emergencyContact?.relationship || '');
+      setEcRelationship(member.emergencyContact?.relationship || 'Son / Daughter');
       setQuietStart(member.callingPreferences?.quietHoursStart || '22:00');
       setQuietEnd(member.callingPreferences?.quietHoursEnd || '06:30');
-      setMaxRetries(member.callingPreferences?.maxRetries ?? 2);
-      setRetryIntervalMinutes(member.callingPreferences?.retryIntervalMinutes ?? 10);
+      setMaxRetries(String(member.callingPreferences?.maxRetries ?? 2));
+      setRetryIntervalMinutes(String(member.callingPreferences?.retryIntervalMinutes ?? 10));
       setAllowMealReminders(member.callingPreferences?.allowMealReminders ?? true);
       setAllowMedicineReminders(member.callingPreferences?.allowMedicineReminders ?? true);
       setAllowConfirmationCalls(member.callingPreferences?.allowConfirmationCalls ?? true);
@@ -97,8 +111,8 @@ export function FamilyMemberDialog({
       setEcRelationship('Son / Daughter');
       setQuietStart('22:00');
       setQuietEnd('06:30');
-      setMaxRetries(2);
-      setRetryIntervalMinutes(10);
+      setMaxRetries('2');
+      setRetryIntervalMinutes('10');
       setAllowMealReminders(true);
       setAllowMedicineReminders(true);
       setAllowConfirmationCalls(true);
@@ -115,25 +129,99 @@ export function FamilyMemberDialog({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    const cleanedName = fullName.trim();
+    const cleanedPhone = normalizePhoneInput(phoneNumber);
+    const cleanedEcName = ecName.trim();
+    const cleanedEcPhone = normalizePhoneInput(ecPhone);
+    const cleanedEcRel = ecRelationship.trim();
+
+    if (cleanedName.length < 2) {
+      setError('Full name must be at least 2 characters.');
+      return;
+    }
+    if (!isValidE164Client(cleanedPhone)) {
+      setError(
+        "Patient phone number must be in E.164 format starting with '+' and country code (e.g., +919876543210)."
+      );
+      return;
+    }
+    if (cleanedEcName.length < 2) {
+      setError('Emergency contact name must be at least 2 characters.');
+      return;
+    }
+    if (!isValidE164Client(cleanedEcPhone)) {
+      setError(
+        "Emergency contact phone must be in E.164 format starting with '+' and country code (e.g., +919811122233)."
+      );
+      return;
+    }
+    if (cleanedEcRel.length < 2) {
+      setError('Emergency contact relationship must be at least 2 characters.');
+      return;
+    }
+
+    let parsedAge: number | undefined;
+    const trimmedAge = age.trim();
+    if (trimmedAge !== '') {
+      if (!/^\d+$/.test(trimmedAge)) {
+        setError('Age must be a whole number between 0 and 130.');
+        return;
+      }
+      const n = Number.parseInt(trimmedAge, 10);
+      if (n < 0 || n > 130) {
+        setError('Age must be between 0 and 130.');
+        return;
+      }
+      parsedAge = n;
+    }
+
+    const trimmedRetries = maxRetries.trim();
+    const parsedMaxRetries = trimmedRetries === '' ? 2 : Number.parseInt(trimmedRetries, 10);
+    if (
+      (trimmedRetries !== '' && !/^\d+$/.test(trimmedRetries)) ||
+      !Number.isInteger(parsedMaxRetries) ||
+      parsedMaxRetries < 0 ||
+      parsedMaxRetries > 5
+    ) {
+      setError('Max Retries must be a whole number between 0 and 5.');
+      return;
+    }
+
+    const trimmedInterval = retryIntervalMinutes.trim();
+    const parsedRetryInterval = trimmedInterval === '' ? 10 : Number.parseInt(trimmedInterval, 10);
+    if (
+      (trimmedInterval !== '' && !/^\d+$/.test(trimmedInterval)) ||
+      !Number.isInteger(parsedRetryInterval) ||
+      parsedRetryInterval < 5 ||
+      parsedRetryInterval > 60
+    ) {
+      setError('Retry Interval must be a whole number between 5 and 60 minutes.');
+      return;
+    }
+
+    const trimmedQuietStart = quietStart.trim();
+    const trimmedQuietEnd = quietEnd.trim();
+    const timeRegex = /^\d{2}:\d{2}$/;
+
     setSubmitting(true);
 
-    const payload = {
-      fullName: fullName.trim(),
-      phoneNumber: phoneNumber.trim(),
-      age: age.trim() ? Number(age) : undefined,
+    const payload: Record<string, unknown> = {
+      fullName: cleanedName,
+      phoneNumber: cleanedPhone,
       preferredLanguage,
-      timezone,
-      relationship,
+      timezone: timezone.trim() || 'Asia/Kolkata',
+      relationship: relationship.trim(),
       emergencyContact: {
-        name: ecName.trim(),
-        phoneNumber: ecPhone.trim(),
-        relationship: ecRelationship.trim(),
+        name: cleanedEcName,
+        phoneNumber: cleanedEcPhone,
+        relationship: cleanedEcRel,
       },
       callingPreferences: {
-        quietHoursStart: quietStart,
-        quietHoursEnd: quietEnd,
-        maxRetries: Number(maxRetries),
-        retryIntervalMinutes: Number(retryIntervalMinutes),
+        ...(timeRegex.test(trimmedQuietStart) ? { quietHoursStart: trimmedQuietStart } : {}),
+        ...(timeRegex.test(trimmedQuietEnd) ? { quietHoursEnd: trimmedQuietEnd } : {}),
+        maxRetries: parsedMaxRetries,
+        retryIntervalMinutes: parsedRetryInterval,
         allowMealReminders,
         allowMedicineReminders,
         allowConfirmationCalls,
@@ -143,8 +231,17 @@ export function FamilyMemberDialog({
       transcriptConsentStatus,
       voiceCallingConsentStatus,
       isActive,
-      notes: notes.trim() || undefined,
     };
+
+    if (parsedAge !== undefined) {
+      payload.age = parsedAge;
+    }
+    const trimmedNotes = notes.trim();
+    if (trimmedNotes) {
+      payload.notes = trimmedNotes;
+    } else if (isEdit && member?.notes) {
+      payload.notes = '';
+    }
 
     try {
       if (isEdit && member) {
@@ -206,11 +303,26 @@ export function FamilyMemberDialog({
                   Phone Number (with country code) *
                 </label>
                 <Input
+                  type="tel"
                   required
                   placeholder="+919876543210"
                   value={phoneNumber}
                   onChange={(e) => setPhoneNumber(e.target.value)}
                 />
+                {phoneNumber.trim() && !phoneNumber.trim().startsWith('+') ? (
+                  <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-amber-700">
+                    <span>Include country code (e.g. +91...)</span>
+                    {/^\d{10}$/.test(phoneNumber.trim()) ? (
+                      <button
+                        type="button"
+                        onClick={() => setPhoneNumber(`+91${phoneNumber.trim()}`)}
+                        className="font-semibold text-blue-600 underline hover:text-blue-700"
+                      >
+                        Add +91
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">
@@ -250,15 +362,15 @@ export function FamilyMemberDialog({
                 >
                   {SUPPORTED_LANGUAGES.map((lang) => (
                     <option key={lang.code} value={lang.code}>
-                      {lang.name} ({lang.nativeName}){!lang.sarvamSupported ? ' — Fallback Required on Sarvam' : ''}
+                      {lang.name} ({lang.nativeName}){!lang.sarvamSupported ? ' — Fallback Required' : ''}
                     </option>
                   ))}
                 </SelectNative>
                 {SUPPORTED_LANGUAGES.find((l) => l.code === preferredLanguage)?.sarvamSupported ===
                 false ? (
                   <p className="mt-1 text-[11px] text-amber-700">
-                    Sarvam live calling does not support this language natively; explicit Admin
-                    fallback authorization will be required before dialing (never auto-switches to Hindi).
+                    Live voice calling does not natively support this language yet; explicit Admin
+                    fallback authorization will be required before placing a call (never auto-switches to Hindi).
                   </p>
                 ) : null}
               </div>
@@ -299,11 +411,26 @@ export function FamilyMemberDialog({
                   Contact Phone *
                 </label>
                 <Input
+                  type="tel"
                   required
                   placeholder="+919811122233"
                   value={ecPhone}
                   onChange={(e) => setEcPhone(e.target.value)}
                 />
+                {ecPhone.trim() && !ecPhone.trim().startsWith('+') ? (
+                  <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-amber-700">
+                    <span>Include country code (e.g. +91...)</span>
+                    {/^\d{10}$/.test(ecPhone.trim()) ? (
+                      <button
+                        type="button"
+                        onClick={() => setEcPhone(`+91${ecPhone.trim()}`)}
+                        className="font-semibold text-blue-600 underline hover:text-blue-700"
+                      >
+                        Add +91
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">
@@ -324,7 +451,7 @@ export function FamilyMemberDialog({
             <h4 className="text-xs font-bold uppercase tracking-wider text-blue-700">
               Calling Preferences & Consent
             </h4>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 min-[420px]:grid-cols-2 md:grid-cols-4 gap-3">
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">
                   Quiet Hours Start
@@ -354,7 +481,7 @@ export function FamilyMemberDialog({
                   min={0}
                   max={5}
                   value={maxRetries}
-                  onChange={(e) => setMaxRetries(Number(e.target.value))}
+                  onChange={(e) => setMaxRetries(e.target.value)}
                 />
               </div>
               <div>
@@ -366,7 +493,7 @@ export function FamilyMemberDialog({
                   min={5}
                   max={60}
                   value={retryIntervalMinutes}
-                  onChange={(e) => setRetryIntervalMinutes(Number(e.target.value))}
+                  onChange={(e) => setRetryIntervalMinutes(e.target.value)}
                 />
               </div>
             </div>
@@ -484,16 +611,17 @@ export function FamilyMemberDialog({
             />
           </div>
 
-          <div className="flex justify-end gap-3 pt-2">
+          <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2.5 sm:gap-3 pt-2">
             <Button
               type="button"
               variant="outline"
               onClick={() => onOpenChange(false)}
               disabled={submitting}
+              className="w-full sm:w-auto"
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={submitting}>
+            <Button type="submit" disabled={submitting} className="w-full sm:w-auto">
               {submitting
                 ? 'Saving...'
                 : isEdit

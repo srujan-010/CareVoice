@@ -123,22 +123,23 @@ export default function CallbacksPage() {
   return (
     <div className="space-y-6 animate-fade-up">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
+        <div className="min-w-0">
+          <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900">
             Smart Callback Queue
           </h1>
           <p className="text-sm text-slate-500">
             Meal-delay and retry callbacks validated against active prescriptions, duplicate guards
-            & retry limits.
+            &amp; retry limits.
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
-          <Button variant="outline" onClick={loadCallbacks}>
+        <div className="flex flex-col min-[420px]:flex-row min-[420px]:flex-wrap items-stretch min-[420px]:items-center gap-2.5">
+          <Button variant="outline" onClick={loadCallbacks} className="w-full min-[420px]:w-auto">
             <RefreshCw className="h-4 w-4" />
+            <span className="min-[420px]:hidden">Refresh</span>
           </Button>
           {canEdit ? (
-            <Button onClick={openCreateModal}>
+            <Button onClick={openCreateModal} className="w-full min-[420px]:w-auto">
               <Plus className="h-4 w-4" />
               Schedule Callback
             </Button>
@@ -147,11 +148,11 @@ export default function CallbacksPage() {
       </div>
 
       <Card>
-        <CardContent className="p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+        <CardContent className="p-4 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
           <SelectNative
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="sm:w-56"
+            className="w-full sm:w-56"
           >
             <option value="">All Callback Statuses</option>
             <option value="REQUESTED">Requested</option>
@@ -188,9 +189,9 @@ export default function CallbacksPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {callbacks.map((cb) => (
             <Card key={cb._id} className="hover:shadow-card-hover">
-              <CardHeader className="pb-2 flex flex-row items-start justify-between space-y-0">
-                <div>
-                  <CardTitle className="text-base">
+              <CardHeader className="pb-2 flex flex-col min-[420px]:flex-row min-[420px]:items-start justify-between gap-2 space-y-0">
+                <div className="min-w-0">
+                  <CardTitle className="text-base break-words">
                     {cb.familyMemberId?.fullName || 'Patient'} — {cb.medicineId?.name}{' '}
                     ({cb.medicineId?.dosage})
                   </CardTitle>
@@ -206,6 +207,7 @@ export default function CallbacksPage() {
                         ? 'danger'
                         : 'indigo'
                   }
+                  className="self-start shrink-0"
                 >
                   {cb.status}
                 </Badge>
@@ -291,11 +293,16 @@ export default function CallbacksPage() {
                   onChange={(e) => setReason(e.target.value)}
                 />
               </div>
-              <div className="flex justify-end gap-2">
-                <Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>
+              <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setCreateOpen(false)}
+                  className="w-full sm:w-auto"
+                >
                   Cancel
                 </Button>
-                <Button type="submit" disabled={submitting}>
+                <Button type="submit" disabled={submitting} className="w-full sm:w-auto">
                   {submitting ? 'Scheduling...' : 'Create Callback'}
                 </Button>
               </div>

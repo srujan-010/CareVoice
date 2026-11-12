@@ -18,6 +18,7 @@ import {
   tryGetSupportedLanguage,
 } from '../constants/languages';
 import {
+  CALL_TYPES,
   CallLifecycleStatus,
   CallOutcome,
   CallType,
@@ -31,6 +32,7 @@ import { Callback } from '../models/Callback';
 import { Conversation } from '../models/Conversation';
 import { DoseInstance } from '../models/DoseInstance';
 import { Escalation } from '../models/Escalation';
+import { Family } from '../models/Family';
 import { FamilyMember } from '../models/FamilyMember';
 import { Medicine } from '../models/Medicine';
 import { MedicineSchedule } from '../models/MedicineSchedule';
@@ -43,7 +45,8 @@ import {
   ValidationError,
 } from '../utils/errors';
 import { normalizeAndValidateE164 } from '../utils/phone';
-import { isWithinQuietHours } from '../utils/timezone';
+import { getLocalDateRangeUtc, getLocalDateString, isWithinQuietHours } from '../utils/timezone';
+import { sanitizePublicVoiceText } from '../utils/whiteLabel';
 import { recordAudit } from './audit.service';
 import { requestSmartCallback, verifyCallbackBeforeCall } from './callback.service';
 import { createEscalation } from './escalation.service';
@@ -597,20 +600,20 @@ export async function simulateCallForDose(input: SimulateCallInput) {
     mode: 'mock',
     isMock: true,
     isTestCall: false,
-    callPurpose: `Simulated mock call (${input.scenario})`,
+    callPurpose: `Simulated test call (${input.scenario})`,
     callStatus: 'INITIATING',
     statusHistory: [
       {
         status: 'QUEUED',
         timestamp: now,
         source: 'SYSTEM',
-        note: 'Mock sandbox simulation queued',
+        note: 'Test environment simulation queued',
       },
       {
         status: 'INITIATING',
         timestamp: now,
         source: 'SYSTEM',
-        note: 'Generating simulated mock dialogue (no real phone dialed)',
+        note: 'Generating simulated dialogue (no real phone dialed)',
       },
     ],
     recordingConsentGranted,
@@ -658,7 +661,7 @@ export async function simulateCallForDose(input: SimulateCallInput) {
     doseInstanceId: String(dose._id),
     callType,
     isTestCall: false,
-    callPurpose: `Mock sandbox (${input.scenario})`,
+    callPurpose: `Test environment (${input.scenario})`,
     scheduledAtIso: dose.scheduledAt.toISOString(),
     safetyDirectives: MEDICAL_SAFETY_DIRECTIVES,
   };
@@ -823,7 +826,7 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
   if (!telephony.ready || !webhook.ready) {
     const missing = [...telephony.missingFields, ...webhook.missingFields];
     throw new AppError(
-      `Live Sarvam telephony is not ready: missing ${missing.join(', ')}`,
+      `Live voice calling is not ready: missing required configuration (${missing.length} item${missing.length === 1 ? '' : 's'})`,
       503,
       'TELEPHONY_NOT_READY',
       {
@@ -833,11 +836,11 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
     );
   }
 
-  // Verify Sarvam Instant Outbound readiness (API auth, app_id, committed version, webhook, variables & non-conflicting connection)
+  // Verify outbound voice service readiness (API auth, app_id, committed version, webhook, variables & non-conflicting connection)
   const deploymentCheck = await verifySarvamAgentDeployment();
   if (!deploymentCheck.instantOutboundReady) {
     throw new AppError(
-      deploymentCheck.message,
+      sanitizePublicVoiceText(deploymentCheck.message),
       deploymentCheck.upstreamStatus ? 502 : 503,
       'SARVAM_DEPLOYMENT_NOT_READY',
       { deploymentCheck }
@@ -875,9 +878,10 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
       fallbackLanguageUsed = fbCheck.language.code;
       languageStatus = 'FALLBACK_AUTHORIZED';
     } else {
-      const blockedReason =
+      const blockedReason = sanitizePublicVoiceText(
         primaryLangCheck.reason ||
-        `Preferred language "${requestedCode}" is unavailable on Sarvam; explicit fallback permission is required before calling.`;
+          `Preferred language "${requestedCode}" is unavailable for live voice calling; explicit fallback permission is required before calling.`
+      );
       const blockedLog = await CallLog.create({
         familyId: dose.familyId,
         familyMemberId: member._id,
@@ -982,18 +986,18 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
     isTestCall: true,
     callPurpose,
     callStatus: 'INITIATING',
-    statusHistory: [
+      statusHistory: [
       {
         status: 'QUEUED',
         timestamp: now,
         source: 'ADMIN',
-        note: 'Admin authorized real Sarvam outbound test call',
+        note: 'Admin authorized live outbound voice test call',
       },
       {
         status: 'INITIATING',
         timestamp: now,
         source: 'SYSTEM',
-        note: `Safety, consent, E.164, language (${effectiveLangMeta.name}), and deployment checks passed; calling Sarvam Outbound API`,
+        note: `Safety, consent, E.164, language (${effectiveLangMeta.name}), and service checks passed; initiating outbound call`,
       },
     ],
     recordingConsentGranted,
@@ -1037,7 +1041,7 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
       voiceCallingConsentStatus: member.voiceCallingConsentStatus,
       deploymentStatus: deploymentCheck.status,
     },
-    aiSummary: `Initiating live Sarvam outbound call in ${effectiveLangMeta.name} to ${member.fullName}...`,
+    aiSummary: `Initiating live outbound voice call in ${effectiveLangMeta.name} to ${member.fullName}...`,
   });
 
   const context: VoiceCallContextPayload = {
@@ -1098,9 +1102,9 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
       status: safeLifecycle,
       timestamp: acceptedAt,
       source: 'PROVIDER_API',
-      note: `Sarvam accepted outbound call (attempt_id: ${liveRes.attemptId}, status: ${liveRes.rawStatus}, language: ${effectiveLangMeta.name})`,
+      note: `Voice service accepted outbound call (reference: ${liveRes.attemptId}, status: ${liveRes.rawStatus}, language: ${effectiveLangMeta.name})`,
     });
-    callLog.aiSummary = `Sarvam outbound call accepted (attempt_id: ${liveRes.attemptId}). Dialing ${member.fullName} in ${effectiveLangMeta.name}; awaiting live webhook/reconciliation status. Dose remains ${dose.status}.`;
+    callLog.aiSummary = `Outbound voice call accepted (reference: ${liveRes.attemptId}). Dialing ${member.fullName} in ${effectiveLangMeta.name}; awaiting live status update. Dose remains ${dose.status}.`;
     await callLog.save();
 
     await recordAudit({
@@ -1137,14 +1141,24 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
   } catch (err) {
     const classified = classifySarvamSchedulerError(err);
     const msg = classified.detail;
+    const publicMsg = sanitizePublicVoiceText(msg);
     const failedAt = new Date();
     const isLangFallbackRequired =
       (err instanceof AppError && err.code === 'LANGUAGE_FALLBACK_REQUIRED') ||
       classified.category === 'LANGUAGE_UNAVAILABLE';
+    const isProviderUnavailable = !isLangFallbackRequired && classified.category === 'PROVIDER_ERROR';
 
-    callLog.callStatus = isLangFallbackRequired ? 'LANGUAGE_FALLBACK_REQUIRED' : 'FAILED';
+    callLog.callStatus = isLangFallbackRequired
+      ? 'LANGUAGE_FALLBACK_REQUIRED'
+      : isProviderUnavailable
+        ? 'PROVIDER_UNAVAILABLE'
+        : 'FAILED';
     callLog.outcome = 'FAILED';
-    callLog.sarvamStatus = isLangFallbackRequired ? 'language_unavailable' : 'failed';
+    callLog.sarvamStatus = isLangFallbackRequired
+      ? 'language_unavailable'
+      : isProviderUnavailable
+        ? 'provider_unavailable'
+        : 'failed';
     callLog.providerStatusRaw = isLangFallbackRequired
       ? 'LANGUAGE_UNAVAILABLE'
       : classified.category;
@@ -1154,7 +1168,7 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
     }
     callLog.endedAt = failedAt;
     callLog.lastStatusUpdateAt = failedAt;
-    callLog.failureReason = msg.slice(0, 1000);
+    callLog.failureReason = publicMsg.slice(0, 1000);
     callLog.providerResponseMeta = {
       error: msg.slice(0, 500),
       code: err instanceof AppError ? err.code : 'SARVAM_PROVIDER_ERROR',
@@ -1166,11 +1180,13 @@ export async function initiateRealTestCall(input: RealTestCallInput) {
       status: callLog.callStatus,
       timestamp: failedAt,
       source: 'PROVIDER_API',
-      note: msg.slice(0, 400),
+      note: publicMsg.slice(0, 400),
     });
     callLog.aiSummary = isLangFallbackRequired
-      ? `Language "${effectiveLangMeta.name}" rejected by Sarvam: ${msg}`
-      : `Live Sarvam outbound call failed before connecting: ${msg}`;
+      ? `Language "${effectiveLangMeta.name}" is unavailable for live calling: ${publicMsg}`
+      : isProviderUnavailable
+        ? `Voice service temporarily unavailable before connecting: ${publicMsg}`
+        : `Live outbound voice call failed before connecting: ${publicMsg}`;
     await callLog.save();
 
     await recordAudit({
@@ -1866,9 +1882,9 @@ export async function executeScheduledCallJob(callScheduleId: string): Promise<v
         status: safeLifecycle,
         timestamp: new Date(),
         source: 'PROVIDER_API',
-        note: `Sarvam accepted outbound call (${liveRes.rawStatus})`,
+        note: `Voice service accepted outbound call (${liveRes.rawStatus})`,
       });
-      callLog.aiSummary = `Live Sarvam outbound call accepted (${liveRes.rawStatus}). Awaiting webhook outcome.`;
+      callLog.aiSummary = `Live outbound voice call accepted (${liveRes.rawStatus}). Awaiting call completion update.`;
       await callLog.save();
       job.status = 'COMPLETED';
       job.completedAt = new Date();
@@ -1877,12 +1893,22 @@ export async function executeScheduledCallJob(callScheduleId: string): Promise<v
     } catch (err) {
       const classified = classifySarvamSchedulerError(err);
       const msg = classified.detail;
+      const publicMsg = sanitizePublicVoiceText(msg);
       const failedAt = new Date();
       const isLangUnavailable = classified.category === 'LANGUAGE_UNAVAILABLE';
+      const isProviderUnavailable = !isLangUnavailable && classified.category === 'PROVIDER_ERROR';
 
-      callLog.callStatus = isLangUnavailable ? 'LANGUAGE_UNAVAILABLE' : 'FAILED';
+      callLog.callStatus = isLangUnavailable
+        ? 'LANGUAGE_UNAVAILABLE'
+        : isProviderUnavailable
+          ? 'PROVIDER_UNAVAILABLE'
+          : 'FAILED';
       callLog.outcome = 'FAILED';
-      callLog.sarvamStatus = isLangUnavailable ? 'language_unavailable' : 'failed';
+      callLog.sarvamStatus = isLangUnavailable
+        ? 'language_unavailable'
+        : isProviderUnavailable
+          ? 'provider_unavailable'
+          : 'failed';
       callLog.providerStatusRaw = isLangUnavailable ? 'LANGUAGE_UNAVAILABLE' : classified.category;
       callLog.errorCategory = classified.category;
       if (isLangUnavailable) {
@@ -1890,7 +1916,7 @@ export async function executeScheduledCallJob(callScheduleId: string): Promise<v
       }
       callLog.endedAt = failedAt;
       callLog.lastStatusUpdateAt = failedAt;
-      callLog.failureReason = msg.slice(0, 1000);
+      callLog.failureReason = publicMsg.slice(0, 1000);
       callLog.providerResponseMeta = {
         error: msg.slice(0, 500),
         code: err instanceof AppError ? err.code : 'SARVAM_PROVIDER_ERROR',
@@ -1902,11 +1928,13 @@ export async function executeScheduledCallJob(callScheduleId: string): Promise<v
         status: callLog.callStatus,
         timestamp: failedAt,
         source: 'PROVIDER_API',
-        note: `[${classified.category}] ${msg.slice(0, 350)}`,
+        note: `[${classified.category}] ${publicMsg.slice(0, 350)}`,
       });
       callLog.aiSummary = isLangUnavailable
-        ? `Scheduled call aborted: requested language unavailable (${msg})`
-        : `Scheduled Sarvam outbound call failed (${classified.category}): ${msg}`;
+        ? `Scheduled call aborted: requested language unavailable (${publicMsg})`
+        : isProviderUnavailable
+          ? `Voice service temporarily unavailable (${classified.category}): ${publicMsg}`
+          : `Scheduled outbound voice call failed (${classified.category}): ${publicMsg}`;
       await callLog.save();
 
       // Always keep DoseInstance as UNCONFIRMED (never assume taken on failure)
@@ -2010,18 +2038,59 @@ export async function listCalls(
     familyMemberId?: string;
     outcome?: CallOutcome;
     callStatus?: CallLifecycleStatus;
-    callType?: CallType;
+    callType?: CallType | 'ADMIN_TEST_CALL';
+    isTestCall?: boolean;
     mode?: 'mock' | 'live';
+    dateFrom?: string;
+    dateTo?: string;
   }
 ) {
-  const query: Record<string, unknown> = { familyId: new Types.ObjectId(familyId) };
-  if (filters?.familyMemberId) {
+  const familyObjectId = new Types.ObjectId(familyId);
+  const query: Record<string, unknown> = { familyId: familyObjectId };
+  if (filters?.familyMemberId && Types.ObjectId.isValid(filters.familyMemberId)) {
     query.familyMemberId = new Types.ObjectId(filters.familyMemberId);
   }
   if (filters?.outcome) query.outcome = filters.outcome;
   if (filters?.callStatus) query.callStatus = filters.callStatus;
-  if (filters?.callType) query.callType = filters.callType;
-  if (filters?.mode) query.mode = filters.mode;
+  if (filters?.callType === 'ADMIN_TEST_CALL') {
+    query.isTestCall = true;
+  } else if (filters?.callType && (CALL_TYPES as readonly string[]).includes(filters.callType)) {
+    query.callType = filters.callType;
+  }
+  if (filters?.isTestCall !== undefined) {
+    query.isTestCall = filters.isTestCall;
+  }
+  if (filters?.mode) {
+    query.mode = filters.mode;
+    query.isMock = filters.mode === 'mock';
+  }
+
+  if (filters?.dateFrom || filters?.dateTo) {
+    const family = await Family.findById(familyObjectId).lean();
+    const timezone = family?.timezone ?? 'Asia/Kolkata';
+    const createdAtFilter: Record<string, Date> = {};
+
+    if (filters.dateFrom) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(filters.dateFrom)) {
+        createdAtFilter.$gte = getLocalDateRangeUtc(filters.dateFrom, timezone).startUtc;
+      } else {
+        const parsedFrom = new Date(filters.dateFrom);
+        if (!Number.isNaN(parsedFrom.getTime())) createdAtFilter.$gte = parsedFrom;
+      }
+    }
+    if (filters.dateTo) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(filters.dateTo)) {
+        createdAtFilter.$lte = getLocalDateRangeUtc(filters.dateTo, timezone).endUtc;
+      } else {
+        const parsedTo = new Date(filters.dateTo);
+        if (!Number.isNaN(parsedTo.getTime())) createdAtFilter.$lte = parsedTo;
+      }
+    }
+
+    if (Object.keys(createdAtFilter).length > 0) {
+      query.createdAt = createdAtFilter;
+    }
+  }
 
   return CallLog.find(query)
     .populate('familyMemberId', 'fullName phoneNumber preferredLanguage timezone')
@@ -2030,6 +2099,90 @@ export async function listCalls(
     .sort({ createdAt: -1 })
     .limit(100)
     .lean();
+}
+
+/**
+ * Today's live patient call statistics in the family's local timezone.
+ * Strictly excludes simulated test calls (`mode: 'mock'` / `isMock: true`).
+ */
+export async function getTodaysLiveCallStats(familyId: string) {
+  const familyObjectId = new Types.ObjectId(familyId);
+  const family = await Family.findById(familyObjectId).lean();
+  const timezone = family?.timezone ?? 'Asia/Kolkata';
+  const now = new Date();
+  const dateLocal = getLocalDateString(now, timezone);
+  const { startUtc: todayStart, endUtc: todayEnd } = getLocalDateRangeUtc(dateLocal, timezone);
+
+  const [todaysLiveCalls, mockCallsToday, pendingCallbacks] = await Promise.all([
+    CallLog.find({
+      familyId: familyObjectId,
+      mode: 'live',
+      isMock: false,
+      createdAt: { $gte: todayStart, $lte: todayEnd },
+    })
+      .select('callStatus outcome isTestCall')
+      .lean(),
+    CallLog.countDocuments({
+      familyId: familyObjectId,
+      $or: [{ isMock: true }, { mode: 'mock' }],
+      createdAt: { $gte: todayStart, $lte: todayEnd },
+    }),
+    Callback.countDocuments({
+      familyId: familyObjectId,
+      status: { $in: ['REQUESTED', 'CONFIRMED', 'SCHEDULED'] },
+    }),
+  ]);
+
+  let successfullyConnected = 0;
+  let noAnswer = 0;
+  let failedCalls = 0;
+
+  for (const call of todaysLiveCalls) {
+    const status = call.callStatus;
+    const outcome = call.outcome;
+
+    if (
+      status === 'NO_ANSWER' ||
+      status === 'BUSY' ||
+      status === 'REJECTED' ||
+      outcome === 'NO_ANSWER' ||
+      outcome === 'BUSY' ||
+      outcome === 'REJECTED'
+    ) {
+      noAnswer++;
+    } else if (
+      status === 'FAILED' ||
+      status === 'PROVIDER_UNAVAILABLE' ||
+      status === 'NOT_CONNECTED' ||
+      status === 'LANGUAGE_UNAVAILABLE' ||
+      status === 'LANGUAGE_FALLBACK_REQUIRED' ||
+      outcome === 'FAILED' ||
+      outcome === 'NOT_CONNECTED'
+    ) {
+      failedCalls++;
+    } else if (
+      status === 'COMPLETED' ||
+      status === 'ANSWERED' ||
+      status === 'IN_PROGRESS' ||
+      outcome === 'COMPLETED' ||
+      outcome === 'ANSWERED' ||
+      outcome === 'CALLBACK_REQUESTED' ||
+      outcome === 'ESCALATED'
+    ) {
+      successfullyConnected++;
+    }
+  }
+
+  return {
+    dateLocal,
+    timezone,
+    totalCalls: todaysLiveCalls.length,
+    successfullyConnected,
+    noAnswer,
+    failedCalls,
+    pendingCallbacks,
+    mockCallsToday,
+  };
 }
 
 /**
@@ -2242,7 +2395,7 @@ async function reconcileSarvamCallInternal(params: {
                 status: evaluated.callStatus,
                 timestamp: now,
                 source: 'RECONCILIATION',
-                note: `Sarvam Analytics reconciled intermediate status: ${attRawStatus}`,
+                note: `Call status reconciled: ${evaluated.callStatus}`,
               });
               updated = true;
             }
@@ -2357,7 +2510,7 @@ async function reconcileSarvamCallInternal(params: {
     const recProbe = await probeSarvamRecording(interactionId);
     if (recProbe.status === 'AVAILABLE') {
       latestLog.recordingStatus = 'AVAILABLE';
-      latestLog.recordingNote = 'Audio recording verified available on Sarvam Analytics.';
+      latestLog.recordingNote = 'Audio recording verified available.';
       await Recording.findOneAndUpdate(
         { callLogId: latestLog._id },
         {
@@ -2380,11 +2533,11 @@ async function reconcileSarvamCallInternal(params: {
       if (params.force || elapsedMs > 90_000) {
         latestLog.recordingStatus = 'UNAVAILABLE';
         latestLog.recordingNote =
-          'Audio recording returned HTTP 404 on Sarvam Analytics. Vobiz/Sarvam call recording may not be enabled for this attempt.';
+          'No audio recording is available from the voice service for this call (HTTP 404).';
       } else {
         latestLog.recordingStatus = 'PROCESSING';
         latestLog.recordingNote =
-          'Recording returned HTTP 404 (Sarvam Analytics has up to ~60s archival delay). Retry shortly.';
+          'Audio recording is currently processing and typically becomes available within ~60 seconds. Check again shortly.';
       }
       updated = true;
     }
@@ -2644,8 +2797,8 @@ export async function getAuthorizedRecordingAudio(
               recordingStatus: elapsedMs > 90_000 ? 'UNAVAILABLE' : 'PROCESSING',
               recordingNote:
                 elapsedMs > 90_000
-                  ? 'Audio recording returned HTTP 404 on Sarvam Analytics. Vobiz/Sarvam recording may be disabled or unavailable.'
-                  : 'Audio recording not yet available on Sarvam Analytics (HTTP 404). Retry after ~60s archival window.',
+                  ? 'No audio recording is available for this call.'
+                  : 'Audio recording is still processing. Please check again after ~60 seconds.',
             },
           }
         ).catch(() => undefined);
