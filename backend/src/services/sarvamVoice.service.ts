@@ -1,0 +1,376 @@
+import { MockVoiceProvider } from '../adapters/voice/mockVoice.provider';
+import { SarvamVoiceProvider } from '../adapters/voice/sarvamVoice.provider';
+import {
+  IVoiceProvider,
+  MockCallScenario,
+  SimulatedTurn,
+  VoiceCallContextPayload,
+  VoiceCallExecutionResult,
+} from '../adapters/voice/voiceProvider.interface';
+import { env, getSarvamWebhookReadiness, isTelephonyReady } from '../config/env';
+import { CallOutcome, MedicineConfirmationValue } from '../constants/statuses';
+import { SarvamCallConnectivityStatus } from '../models/CallLog';
+import { normalizeAndValidateE164 } from '../utils/phone';
+
+const mockProvider = new MockVoiceProvider();
+const sarvamProvider = new SarvamVoiceProvider();
+
+export interface SarvamTranscriptTurnInput {
+  role?: string;
+  speaker?: string;
+  en_text?: string;
+  indic_text?: string;
+  text?: string;
+  content?: string;
+  translatedText?: string;
+  intent?: string;
+}
+
+export interface SarvamOutboundWebhookPayload {
+  attempt_id: string;
+  status: SarvamCallConnectivityStatus;
+  channel_info?: Record<string, unknown> | null;
+  duration?: number | null;
+  interaction_id?: string | null;
+  failure_reason?: string | null;
+  final_agent_variables?: Record<string, unknown> | null;
+  webhook_config?: {
+    url?: string;
+    metadata?: Record<string, unknown> | null;
+  } | null;
+  interaction_transcript?: SarvamTranscriptTurnInput[] | null;
+}
+
+function readBooleanVar(vars: Record<string, unknown>, keys: string[]): boolean | null {
+  for (const key of keys) {
+    if (!(key in vars)) continue;
+    const raw = vars[key];
+    if (typeof raw === 'boolean') return raw;
+    if (typeof raw === 'string') {
+      const normalized = raw.trim().toLowerCase();
+      if (['true', 'yes', '1'].includes(normalized)) return true;
+      if (['false', 'no', '0'].includes(normalized)) return false;
+    }
+  }
+  return null;
+}
+
+function readExplicitMedicineConfirmation(
+  vars: Record<string, unknown> | null | undefined
+): MedicineConfirmationValue {
+  if (!vars) return 'UNCONFIRMED';
+
+  // Negative flags always prevent marking a dose as TAKEN
+  const negativeBool = readBooleanVar(vars, [
+    'medicine_not_taken',
+    'medicineNotTaken',
+    'patient_forgot',
+    'patientForgot',
+    'dose_skipped',
+  ]);
+  if (negativeBool === true) {
+    return 'NOT_TAKEN';
+  }
+
+  const candidateKeys = [
+    'medicine_taken',
+    'medicineTaken',
+    'medicine_confirmed',
+    'medicineConfirmed',
+    'dose_taken',
+    'doseTaken',
+    'explicit_medicine_confirmation',
+  ];
+
+  for (const key of candidateKeys) {
+    if (!(key in vars)) continue;
+    const val = vars[key];
+    if (val === false) return 'NOT_TAKEN';
+    if (val === true) return 'TAKEN';
+    if (typeof val === 'string') {
+      const upper = val.trim().toUpperCase();
+      if (['NOT_TAKEN', 'PATIENT_REPORTED_NOT_TAKEN', 'NO', 'FALSE', 'FORGOT'].includes(upper)) {
+        return 'NOT_TAKEN';
+      }
+      if (['TAKEN', 'PATIENT_REPORTED_TAKEN', 'YES', 'TRUE', 'CONFIRMED_TAKEN'].includes(upper)) {
+        return 'TAKEN';
+      }
+    }
+  }
+
+  return 'UNCONFIRMED';
+}
+
+export function getActiveVoiceProvider(): IVoiceProvider {
+  const readiness = isTelephonyReady();
+  if (readiness.ready && env.VOICE_PROVIDER_MODE === 'sarvam') {
+    return sarvamProvider;
+  }
+  return mockProvider;
+}
+
+export function getVoiceAgentStatus() {
+  const readiness = isTelephonyReady();
+  const webhookReadiness = getSarvamWebhookReadiness();
+
+  return {
+    activeProvider: getActiveVoiceProvider().providerName,
+    configuredMode: env.VOICE_PROVIDER_MODE,
+    telephonyEnabled: env.TELEPHONY_ENABLED,
+    telephonyReady: readiness.ready,
+    missingTelephonyFields: readiness.missingFields,
+    webhookReady: webhookReadiness.ready,
+    missingWebhookFields: webhookReadiness.missingFields,
+    webhookHttps: webhookReadiness.isHttps,
+    agentVersion: env.SARVAM_AGENT_VERSION,
+    providers: {
+      mock: mockProvider.getStatus(),
+      sarvam: sarvamProvider.getStatus(),
+    },
+  };
+}
+
+export async function dispatchLiveVoiceCall(context: VoiceCallContextPayload) {
+  const validatedUserPhone = normalizeAndValidateE164(
+    context.phoneNumber,
+    'user_config.user_phone_number'
+  );
+  return sarvamProvider.initiateLiveCall({
+    ...context,
+    phoneNumber: validatedUserPhone,
+  });
+}
+
+export async function simulateMockVoiceCall(
+  context: VoiceCallContextPayload,
+  scenario: MockCallScenario,
+  options?: { delayMinutes?: number }
+): Promise<VoiceCallExecutionResult> {
+  return mockProvider.simulateCall(context, scenario, options);
+}
+
+/**
+ * Normalizes official Sarvam `interaction_transcript` items ({ role, en_text, indic_text })
+ * or generic turn objects into CareVoice Conversation turns.
+ */
+export function mapSarvamTranscript(
+  rawTranscript?: SarvamTranscriptTurnInput[] | null
+): SimulatedTurn[] {
+  if (!Array.isArray(rawTranscript)) return [];
+
+  const turns: SimulatedTurn[] = [];
+  for (const item of rawTranscript) {
+    if (!item || typeof item !== 'object') continue;
+    const rawRole = (item.role || item.speaker || '').toString().trim().toLowerCase();
+    const speaker: 'AI' | 'PATIENT' =
+      rawRole === 'agent' || rawRole === 'assistant' || rawRole === 'ai' ? 'AI' : 'PATIENT';
+
+    const indicText = typeof item.indic_text === 'string' ? item.indic_text.trim() : '';
+    const enText = typeof item.en_text === 'string' ? item.en_text.trim() : '';
+    const directText =
+      typeof item.text === 'string'
+        ? item.text.trim()
+        : typeof item.content === 'string'
+          ? item.content.trim()
+          : '';
+
+    const primaryText = indicText || directText || enText;
+    if (!primaryText) continue;
+
+    const translatedText =
+      typeof item.translatedText === 'string' && item.translatedText.trim()
+        ? item.translatedText.trim()
+        : indicText && enText && indicText !== enText
+          ? enText
+          : undefined;
+
+    turns.push({
+      speaker,
+      text: primaryText,
+      translatedText,
+      intent: typeof item.intent === 'string' && item.intent.trim() ? item.intent.trim() : undefined,
+    });
+  }
+
+  return turns;
+}
+
+/**
+ * Interprets official Sarvam outbound webhook status + final_agent_variables.
+ * Strict medical safety rules:
+ * - Only `connected` calls may inspect patient intake variables.
+ * - `no_answer`, `busy`, and `failed` ALWAYS stay UNCONFIRMED.
+ * - Meal confirmation (`meal_finished`) NEVER implies medicine intake.
+ * - Medicine intake is marked `TAKEN` ONLY when explicit confirmation variables support it.
+ */
+export function evaluateSarvamAgentOutcome(
+  payload: SarvamOutboundWebhookPayload,
+  patientName: string,
+  medicineName: string
+): {
+  outcome: CallOutcome;
+  durationSeconds: number;
+  mealConfirmed: boolean | null;
+  medicineConfirmed: MedicineConfirmationValue;
+  requestedCallbackDelayMinutes?: number;
+  feelingUnwell: boolean;
+  requestedHelp: boolean;
+  turns: SimulatedTurn[];
+  aiSummary: string;
+  safetyFlags: string[];
+} {
+  const durationSeconds =
+    typeof payload.duration === 'number' && Number.isFinite(payload.duration) && payload.duration > 0
+      ? Math.round(payload.duration)
+      : 0;
+
+  if (payload.status === 'no_answer') {
+    return {
+      outcome: 'NO_ANSWER',
+      durationSeconds,
+      mealConfirmed: null,
+      medicineConfirmed: 'UNCONFIRMED',
+      feelingUnwell: false,
+      requestedHelp: false,
+      turns: [],
+      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} had no answer. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['SARVAM_NO_ANSWER', 'DOSE_UNCONFIRMED'],
+    };
+  }
+
+  if (payload.status === 'busy') {
+    return {
+      outcome: 'BUSY',
+      durationSeconds,
+      mealConfirmed: null,
+      medicineConfirmed: 'UNCONFIRMED',
+      feelingUnwell: false,
+      requestedHelp: false,
+      turns: [],
+      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} encountered a busy line. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['SARVAM_BUSY', 'DOSE_UNCONFIRMED'],
+    };
+  }
+
+  if (payload.status === 'failed') {
+    const reasonText = payload.failure_reason ? ` (${payload.failure_reason})` : '';
+    return {
+      outcome: 'FAILED',
+      durationSeconds,
+      mealConfirmed: null,
+      medicineConfirmed: 'UNCONFIRMED',
+      feelingUnwell: false,
+      requestedHelp: false,
+      turns: [],
+      aiSummary: `Sarvam outbound call to ${patientName} for ${medicineName} failed${reasonText}. Dose remains UNCONFIRMED.`,
+      safetyFlags: ['SARVAM_CALL_FAILED', 'DOSE_UNCONFIRMED'],
+    };
+  }
+
+  // status === 'connected'
+  const vars = payload.final_agent_variables ?? null;
+  const turns = mapSarvamTranscript(payload.interaction_transcript);
+
+  const feelingUnwell =
+    vars !== null &&
+    readBooleanVar(vars, [
+      'feeling_unwell',
+      'feelingUnwell',
+      'patient_feeling_unwell',
+      'is_unwell',
+    ]) === true;
+  const requestedHelp =
+    vars !== null &&
+    readBooleanVar(vars, [
+      'requested_help',
+      'requestedHelp',
+      'needs_help',
+      'emergency_help',
+    ]) === true;
+
+  const mealConfirmed =
+    vars !== null
+      ? readBooleanVar(vars, [
+          'meal_finished',
+          'mealFinished',
+          'meal_confirmed',
+          'mealConfirmed',
+          'has_finished_meal',
+        ])
+      : null;
+
+  const callbackRequested =
+    vars !== null &&
+    readBooleanVar(vars, ['callback_requested', 'callbackRequested']) === true;
+
+  const rawDelay = vars
+    ? (vars.callback_delay_minutes ?? vars.delay_minutes ?? vars.delayMinutes)
+    : undefined;
+  const parsedDelay = typeof rawDelay === 'number' ? rawDelay : Number(rawDelay);
+  const requestedCallbackDelayMinutes = callbackRequested
+    ? Number.isInteger(parsedDelay) && parsedDelay >= 1 && parsedDelay <= 120
+      ? parsedDelay
+      : 10
+    : undefined;
+
+  let medicineConfirmed = readExplicitMedicineConfirmation(vars);
+
+  // Callback request or unwell escalation never upgrades an unconfirmed dose to taken,
+  // and callback delay overrides taken if callback was specifically requested instead of intake.
+  if (callbackRequested && medicineConfirmed !== 'NOT_TAKEN') {
+    medicineConfirmed = 'UNCONFIRMED';
+  }
+
+  let outcome: CallOutcome;
+  const safetyFlags: string[] = [];
+
+  if (feelingUnwell || requestedHelp) {
+    outcome = 'ESCALATED';
+    safetyFlags.push(feelingUnwell ? 'PATIENT_FEELING_UNWELL' : 'PATIENT_REQUESTED_HELP');
+  } else if (callbackRequested) {
+    outcome = 'CALLBACK_REQUESTED';
+    safetyFlags.push('CALLBACK_REQUESTED', 'DOSE_UNCONFIRMED');
+  } else if (medicineConfirmed === 'TAKEN') {
+    outcome = 'COMPLETED';
+    safetyFlags.push('EXPLICIT_DOSE_CONFIRMATION');
+  } else if (medicineConfirmed === 'NOT_TAKEN') {
+    outcome = 'COMPLETED';
+    safetyFlags.push('PATIENT_REPORTED_NOT_TAKEN');
+  } else {
+    outcome = 'ANSWERED';
+    if (mealConfirmed === true) {
+      safetyFlags.push('MEAL_CONFIRMED_ONLY');
+    }
+    safetyFlags.push('NO_ASSUMED_TAKE', 'DOSE_UNCONFIRMED');
+  }
+
+  const summaryVar =
+    vars && typeof vars.summary === 'string' && vars.summary.trim()
+      ? vars.summary.trim()
+      : undefined;
+
+  const aiSummary =
+    summaryVar ||
+    (medicineConfirmed === 'TAKEN'
+      ? `Sarvam call connected (${durationSeconds}s): ${patientName} explicitly confirmed taking ${medicineName}.`
+      : medicineConfirmed === 'NOT_TAKEN'
+        ? `Sarvam call connected (${durationSeconds}s): ${patientName} reported NOT taking ${medicineName}.`
+        : outcome === 'CALLBACK_REQUESTED'
+          ? `Sarvam call connected (${durationSeconds}s): ${patientName} requested a callback in ${requestedCallbackDelayMinutes} minutes. Dose stays UNCONFIRMED.`
+          : outcome === 'ESCALATED'
+            ? `Sarvam call escalated (${durationSeconds}s): ${patientName} reported feeling unwell or asked for caregiver help.`
+            : `Sarvam call connected (${durationSeconds}s) for ${patientName} regarding ${medicineName}, but explicit medicine intake was not confirmed. Dose remains UNCONFIRMED.`);
+
+  return {
+    outcome,
+    durationSeconds,
+    mealConfirmed,
+    medicineConfirmed,
+    requestedCallbackDelayMinutes,
+    feelingUnwell,
+    requestedHelp,
+    turns,
+    aiSummary,
+    safetyFlags,
+  };
+}

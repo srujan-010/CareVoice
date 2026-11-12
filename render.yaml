@@ -1,0 +1,59 @@
+services:
+  - type: web
+    name: carevoice-backend
+    runtime: node
+    plan: starter
+    rootDir: backend
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        value: carevoice
+      - key: FRONTEND_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: VOICE_AGENT_INTERNAL_TOKEN
+        sync: false
+      - key: REDIS_ENABLED
+        value: "false"
+      - key: REDIS_URL
+        sync: false
+      - key: VOICE_PROVIDER_MODE
+        value: mock
+      - key: TELEPHONY_ENABLED
+        value: "false"
+      - key: SARVAM_API_BASE_URL
+        value: https://apps.sarvam.ai
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: SARVAM_ORG_ID
+        sync: false
+      - key: SARVAM_WORKSPACE_ID
+        sync: false
+      - key: SARVAM_AGENT_ID
+        sync: false
+      - key: SARVAM_AGENT_VERSION
+        value: "2"
+      - key: SARVAM_CONNECTION_ID
+        sync: false
+      - key: SARVAM_PHONE_NUMBER
+        sync: false
+      - key: SARVAM_WEBHOOK_TOKEN
+        sync: false
+      - key: PUBLIC_WEBHOOK_BASE_URL
+        sync: false
+      - key: WHATSAPP_ENABLED
+        value: "false"
+      - key: SMS_ENABLED
+        value: "false"
+      - key: ALLOW_DEV_DEMO_MODE
+        value: "false"
+
