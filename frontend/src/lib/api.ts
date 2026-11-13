@@ -90,6 +90,11 @@ export async function apiRequest<T>(
     headers.set('Authorization', `Bearer ${token}`);
   }
 
+  const isGetOrHead =
+    !options.method ||
+    options.method.toUpperCase() === 'GET' ||
+    options.method.toUpperCase() === 'HEAD';
+
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, {
@@ -101,11 +106,42 @@ export async function apiRequest<T>(
     if (err instanceof DOMException && err.name === 'AbortError') {
       throw err;
     }
-    throw new ApiClientError(
-      `Unable to reach CareVoice backend API (${API_BASE}). Please verify your network connection or backend deployment status.`,
-      0,
-      'NETWORK_ERROR'
-    );
+    // If a read request failed due to cold boot or brief network interruption, retry once after 1.5s
+    if (isGetOrHead) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      try {
+        response = await fetch(`${API_BASE}${path}`, {
+          ...options,
+          headers,
+          credentials: 'include',
+        });
+      } catch (retryErr) {
+        if (retryErr instanceof DOMException && retryErr.name === 'AbortError') {
+          throw retryErr;
+        }
+        const origin = typeof window !== 'undefined' ? window.location.origin : '';
+        const originHint =
+          origin && !origin.includes('localhost') && !origin.includes('127.0.0.1')
+            ? ` If accessing from ${origin}, verify that this origin is permitted in backend CORS.`
+            : '';
+        throw new ApiClientError(
+          `Unable to reach CareVoice backend API (${API_BASE}).${originHint} Please verify your network connection or backend deployment status.`,
+          0,
+          'NETWORK_ERROR'
+        );
+      }
+    } else {
+      const origin = typeof window !== 'undefined' ? window.location.origin : '';
+      const originHint =
+        origin && !origin.includes('localhost') && !origin.includes('127.0.0.1')
+          ? ` If accessing from ${origin}, verify that this origin is permitted in backend CORS.`
+          : '';
+      throw new ApiClientError(
+        `Unable to reach CareVoice backend API (${API_BASE}).${originHint} Please verify your network connection or backend deployment status.`,
+        0,
+        'NETWORK_ERROR'
+      );
+    }
   }
 
   const payload = await response.json().catch(() => null);
